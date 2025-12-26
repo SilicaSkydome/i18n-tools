@@ -1,0 +1,92 @@
+================================================================================
+                    i18n Manager - Launch Instructions
+================================================================================
+
+✅ STANDALONE .EXE FILE (RECOMMENDED)
+────────────────────────────────────
+Location: dist/i18n-Manager.exe
+Size: ~20 MB
+Requires: Nothing!
+
+HOW TO USE:
+  1. Go to the "dist" folder
+  2. Double-click "i18n-Manager.exe"
+  3. Done! App launches without console
+
+BENEFITS:
+  ✓ No Python needed
+  ✓ No console window
+  ✓ Single file
+  ✓ Can copy anywhere
+  ✓ Share with others easily
+
+────────────────────────────────────
+
+��� PYTHON SOURCE CODE (ALTERNATIVE)
+────────────────────────────────────
+Requires: Python 3.8+
+
+OPTION 1: Debug Launcher (Shows Errors)
+  → Double-click: launch-debug.bat
+  → Use if .exe doesn't work or to see errors
+
+OPTION 2: Normal Launcher (No Console)
+  → Double-click: launch-i18n-manager.bat
+  → Auto-installs dependencies
+
+OPTION 3: Direct Python
+  → python i18n_manager.py
+
+────────────────────────────────────
+
+��� DISTRIBUTION
+────────────────────────────────────
+To share with others:
+
+1. Copy "dist/i18n-Manager.exe"
+2. Send via email, USB, cloud, etc.
+3. They just double-click - no setup needed!
+
+OR share entire folder if they have Python.
+
+────────────────────────────────────
+
+��� REBUILDING .EXE
+────────────────────────────────────
+If you modify the code:
+
+  → Double-click: build-exe.bat
+  → Wait ~30 seconds
+  → New .exe in dist folder
+
+────────────────────────────────────
+
+⚠️ TROUBLESHOOTING
+────────────────────────────────────
+"Windows protected your PC" warning:
+  → Click "More info" → "Run anyway"
+  → This is normal for unsigned .exe files
+
+Antivirus blocks it:
+  → Add exception
+  → Or use Python source version
+
+App won't start:
+  → Run "launch-debug.bat" to see errors
+  → Check if Python 3.8+ is installed
+  → Install dependencies manually:
+    pip install customtkinter deep-translator
+
+────────────────────────────────────
+
+��� MORE HELP
+────────────────────────────────────
+  • README.md - Full documentation
+  • BUILD_EXE.md - Building .exe details
+  • dist/README.txt - .exe specific info
+  • QUICK_REFERENCE.md - Usage guide
+
+================================================================================
+                      ��� READY TO USE!
+           Double-click: dist/i18n-Manager.exe
+================================================================================
