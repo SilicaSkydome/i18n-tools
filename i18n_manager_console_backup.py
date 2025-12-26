@@ -17,7 +17,6 @@ from datetime import datetime
 from collections import defaultdict
 import sys
 import time
-import ctypes
 
 # Windows 11 Acrylic theme
 ctk.set_appearance_mode("dark")
@@ -30,46 +29,6 @@ except ImportError:
     import subprocess
     subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'deep-translator'])
     from deep_translator import GoogleTranslator
-
-
-class StatusCard(ctk.CTkFrame):
-    """Read-only status card widget"""
-    def __init__(self, parent, icon, title, status="pending", **kwargs):
-        super().__init__(parent, **kwargs)
-        
-        self.configure(
-            corner_radius=10,
-            fg_color=("#f0f0f0", "#1c2128"),
-            border_width=1,
-            border_color=("#d0d0d0", "#30363d")
-        )
-        
-        content = ctk.CTkFrame(self, fg_color="transparent")
-        content.pack(fill="x", padx=15, pady=12)
-        
-        self.icon_label = ctk.CTkLabel(content, text=icon, font=ctk.CTkFont(size=20), width=30)
-        self.icon_label.pack(side="left", padx=(0, 10))
-        
-        self.title_label = ctk.CTkLabel(content, text=title, font=ctk.CTkFont(size=13, weight="bold"), anchor="w")
-        self.title_label.pack(side="left", fill="x", expand=True)
-        
-        self.status_label = ctk.CTkLabel(content, text="●", font=ctk.CTkFont(size=16), width=20)
-        self.status_label.pack(side="right", padx=(10, 0))
-        
-        self.set_status(status)
-    
-    def set_status(self, status):
-        colors = {
-            'pending': ("#999", "#666"),
-            'running': ("#0078d4", "#0078d4"),
-            'success': ("#3fb950", "#3fb950"),
-            'error': ("#f85149", "#f85149")
-        }
-        self.status_label.configure(text_color=colors.get(status, colors['pending']))
-        if status == 'running':
-            self.configure(border_color=("#0078d4", "#0078d4"), border_width=2)
-        else:
-            self.configure(border_color=("#d0d0d0", "#30363d"), border_width=1)
 
 
 class I18nManagerApp:
@@ -120,15 +79,7 @@ class I18nManagerApp:
         # Main window - Horizontal layout
         self.root = ctk.CTk()
         self.root.title("i18n Manager")
-        self.root.geometry("1400x750")
-        
-        # Set taskbar icon
-        try:
-            icon_path = Path(__file__).parent / 'icon.ico'
-            if icon_path.exists():
-                self.root.iconbitmap(str(icon_path))
-        except:
-            pass
+        self.root.geometry("1400x750")  # Wider, less tall
         
         # Configure colors
         self.root.configure(fg_color=self.COLORS['bg_app'])
@@ -150,7 +101,6 @@ class I18nManagerApp:
         self.detected_strings: List[Dict] = []
         self.generated_keys: Dict[str, str] = {}
         self.has_i18n_setup = False
-        self.status_cards: List[StatusCard] = []  # Track status cards
         
         # Build UI
         self.create_ui()
@@ -168,19 +118,42 @@ class I18nManagerApp:
     
     def create_ui(self):
         """Create Windows 11 Glass UI - Horizontal Layout"""
-        # Main container with border
-        main_container = ctk.CTkFrame(
-            self.root,
-            corner_radius=12,
-            border_width=1,
-            border_color=self.COLORS['border'],
-            fg_color=self.COLORS['bg_surface']
-        )
-        main_container.pack(fill="both", expand=True, padx=2, pady=2)
+        # Main container
+        main_container = ctk.CTkFrame(self.root, fg_color="transparent")
+        main_container.pack(fill="both", expand=True, padx=15, pady=15)
         
-        # === Content Area ===
+        # === TOP: Glass Title Bar ===
+        title_bar = ctk.CTkFrame(
+            main_container,
+            height=70,
+            corner_radius=15,
+            fg_color=self.COLORS['bg_card'],
+            border_width=1,
+            border_color=self.COLORS['border']
+        )
+        title_bar.pack(fill="x", pady=(0, 12))
+        title_bar.pack_propagate(False)
+        
+        # Title with icon
+        title_label = ctk.CTkLabel(
+            title_bar,
+            text="🌍  i18n Manager",
+            font=ctk.CTkFont(size=28, weight="bold"),
+            text_color=self.COLORS['text']
+        )
+        title_label.pack(side="left", padx=25, pady=15)
+        
+        subtitle = ctk.CTkLabel(
+            title_bar,
+            text="Universal Translation Automation",
+            font=ctk.CTkFont(size=13),
+            text_color=self.COLORS['text_muted']
+        )
+        subtitle.pack(side="left", pady=15)
+        
+        # === MIDDLE: Horizontal Split (Left: Controls, Right: Console) ===
         content_frame = ctk.CTkFrame(main_container, fg_color="transparent")
-        content_frame.pack(fill="both", expand=True, padx=10, pady=10)
+        content_frame.pack(fill="both", expand=True)
         
         # LEFT PANEL: Controls (40% width)
         left_panel = ctk.CTkFrame(
@@ -293,7 +266,7 @@ class I18nManagerApp:
             self.language_vars[code] = var
             
             col += 1
-            if col >= 4:  # 4 columns for more horizontal space
+            if col >= 2:
                 col = 0
                 row += 1
         
@@ -341,47 +314,62 @@ class I18nManagerApp:
         self.replace_btn = self.create_step_btn(scroll, "4️⃣  Update Code", self.run_replace)
     
     def create_right_panel(self, parent):
-        """Right panel with status cards"""
+        """Right panel with console and progress"""
         # Header
         header = ctk.CTkLabel(
             parent,
-            text="📊  Live Status",
+            text="📊  Live Console & Progress",
             font=ctk.CTkFont(size=16, weight="bold"),
             text_color=self.COLORS['text']
         )
-        header.pack(anchor="w", padx=20, pady=(15, 5))
+        header.pack(anchor="w", padx=20, pady=(15, 10))
+        
+        # Current operation label
+        self.current_operation = ctk.CTkLabel(
+            parent,
+            text="Ready to start",
+            font=ctk.CTkFont(size=12),
+            text_color=self.COLORS['text_muted']
+        )
+        self.current_operation.pack(anchor="w", padx=20, pady=(0, 5))
         
         # Progress bar
         self.progress_bar = ctk.CTkProgressBar(
             parent,
-            height=6,
-            corner_radius=3,
+            height=8,
+            corner_radius=4,
             progress_color=self.COLORS['accent']
         )
-        self.progress_bar.pack(fill="x", padx=20, pady=(5, 2))
+        self.progress_bar.pack(fill="x", padx=20, pady=(0, 10))
         self.progress_bar.set(0)
         
         # Progress percentage
         self.progress_label = ctk.CTkLabel(
             parent,
             text="0%",
-            font=ctk.CTkFont(size=10, weight="bold"),
+            font=ctk.CTkFont(size=11, weight="bold"),
             text_color=self.COLORS['text_muted']
         )
         self.progress_label.pack(anchor="e", padx=20, pady=(0, 10))
         
-        # Status cards container
-        self.status_scroll = ctk.CTkScrollableFrame(
+        # Console output
+        self.output_text = ctk.CTkTextbox(
             parent,
-            fg_color="transparent",
-            scrollbar_button_color=self.COLORS['accent'],
-            scrollbar_button_hover_color=self.COLORS['accent_hover']
+            corner_radius=10,
+            font=ctk.CTkFont(family="Consolas", size=11),
+            fg_color=self.COLORS['bg_card'],
+            border_width=1,
+            border_color=self.COLORS['border'],
+            wrap="word"
         )
-        self.status_scroll.pack(fill="both", expand=True, padx=20, pady=(0, 15))
+        self.output_text.pack(fill="both", expand=True, padx=20, pady=(0, 15))
         
-        # Welcome cards
-        self.add_status_card("🎉", "Welcome to i18n Manager", "success")
-        self.add_status_card("ℹ️", "Select a React/TypeScript project to begin", "pending")
+        # Welcome message
+        self.log("🎉 Welcome to i18n Manager!\n")
+        self.log("═" * 50 + "\n")
+        self.log("Select a React/TypeScript project to begin.\n\n")
+        self.log("💡 Tip: The console will show real-time progress\n")
+        self.log("   as operations are performed.\n")
     
     def create_section_header(self, parent, icon, text):
         """Create a section header"""
@@ -416,21 +404,18 @@ class I18nManagerApp:
     
     # ===== UI Helpers =====
     
-    def add_status_card(self, icon: str, text: str, status: str = "pending") -> StatusCard:
-        """Add a new status card to the display"""
-        card = StatusCard(self.status_scroll, icon, text, status)
-        card.pack(fill="x", pady=3, side="top")
-        # Insert at beginning of list so newest is at index 0
-        self.status_cards.insert(0, card)
-        self.root.update()
-        return card
-    
-    def update_progress(self, value: float, text: str = None):
-        """Update progress bar"""
+    def update_progress(self, value: float, operation: str = None):
+        """Update progress bar with percentage"""
         self.progress_bar.set(value)
         self.progress_label.configure(text=f"{int(value * 100)}%")
-        if text and self.status_cards:
-            self.status_cards[0].title_label.configure(text=text)
+        if operation:
+            self.current_operation.configure(text=operation)
+        self.root.update()
+    
+    def log(self, message: str, level: str = "info"):
+        """Log message with color coding"""
+        self.output_text.insert("end", message)
+        self.output_text.see("end")
         self.root.update()
     
     # ===== Core Functionality =====
@@ -447,28 +432,33 @@ class I18nManagerApp:
             text_color=self.COLORS['accent']
         )
         
-        card = self.add_status_card("📁", f"Opened: {self.project_path.name}", "running")
-        self.update_progress(0.1)
+        self.log(f"\n{'═' * 50}\n")
+        self.log(f"📁 PROJECT SELECTED\n")
+        self.log(f"{'═' * 50}\n")
+        self.log(f"Path: {self.project_path}\n\n")
+        
+        self.update_progress(0.1, "Detecting project structure...")
         self.detect_project_setup()
-        card.set_status("success")
     
     def detect_project_setup(self):
         """Detect i18n configuration"""
-        card = self.add_status_card("🔍", "Scanning project structure...", "running")
+        # Find source directory
+        self.log("🔍 Scanning project structure...\n")
         
         for src_name in ['src', 'app', 'client', 'frontend']:
             src_path = self.project_path / src_name
             if src_path.exists():
                 self.src_dir = src_path
+                self.log(f"  ✓ Found source directory: {src_name}/\n")
                 break
         
         if not self.src_dir:
-            card.title_label.configure(text="❌ No src/ directory found")
-            card.set_status("error")
+            self.log("  ❌ No source directory found\n", "error")
             self.status_label.configure(
                 text="❌ No src/ directory",
                 text_color=self.COLORS['error']
             )
+            self.update_progress(0, "Error: No source directory")
             return
         
         # Check i18n setup
@@ -479,32 +469,32 @@ class I18nManagerApp:
         
         if self.has_i18n_setup:
             self.locales_dir = locales_dir
+            self.log("  ✓ i18n is configured\n")
+            self.status_label.configure(
+                text="✅ Ready to process",
+                text_color=self.COLORS['success']
+            )
             
             # Detect languages
             existing = [f.stem for f in locales_dir.glob('*.json') 
                        if f.stem not in ('index', 'config')]
             if existing:
+                self.log(f"  ✓ Found {len(existing)} languages: {', '.join(existing)}\n")
                 for lang in existing:
                     if lang in self.language_vars:
                         self.language_vars[lang].set(True)
                 self.update_selected_languages()
             
-            card.title_label.configure(text=f"✓ i18n configured ({len(existing)} languages)")
-            card.set_status("success")
-            self.status_label.configure(
-                text="✅ Ready to process",
-                text_color=self.COLORS['success']
-            )
             self.workflow_btn.configure(state="normal")
             self.detect_btn.configure(state="normal")
-            self.update_progress(1.0)
+            self.update_progress(1.0, "Ready to start workflow")
         else:
-            card.title_label.configure(text="⚠️ i18n not configured")
-            card.set_status("pending")
+            self.log("  ⚠️ i18n not configured\n")
             self.status_label.configure(
                 text="⚠️ Setup required",
                 text_color=self.COLORS['warning']
             )
+            self.update_progress(0.5, "Needs i18n setup")
             self.offer_i18n_setup()
     
     def offer_i18n_setup(self):
@@ -521,11 +511,15 @@ class I18nManagerApp:
     def create_i18n_setup(self):
         """Create i18n files"""
         try:
-            card = self.add_status_card("🔧", "Setting up i18n...", "running")
+            self.log("\n🔧 Setting up i18n...\n")
+            self.update_progress(0.3, "Creating i18n structure...")
             
             i18n_dir = self.src_dir / 'i18n'
             locales_dir = i18n_dir / 'locales'
             locales_dir.mkdir(parents=True, exist_ok=True)
+            
+            self.log("  ✓ Created directories\n")
+            self.update_progress(0.5, "Creating config files...")
             
             # Config file
             config_content = '''import i18n from 'i18next';
@@ -542,6 +536,9 @@ i18n.use(initReactI18next).init({
 export default i18n;
 '''
             (i18n_dir / 'config.ts').write_text(config_content, encoding='utf-8')
+            self.log("  ✓ Created config.ts\n")
+            
+            self.update_progress(0.7, "Creating language files...")
             
             # Initial locale files
             structure = {"common": {}, "nav": {}, "button": {}, "form": {}, "message": {}}
@@ -549,12 +546,13 @@ export default i18n;
                 with open(locales_dir / f'{lang}.json', 'w', encoding='utf-8') as f:
                     json.dump(structure, f, indent=2, ensure_ascii=False)
             
+            self.log(f"  ✓ Created {len(self.selected_languages)} language file(s)\n")
+            
             # Index file
             (i18n_dir / 'index.ts').write_text("export { default } from './config';\n", encoding='utf-8')
             
-            card.title_label.configure(text="✅ i18n setup complete!")
-            card.set_status("success")
-            self.update_progress(1.0)
+            self.update_progress(1.0, "Setup complete!")
+            self.log("✅ i18n setup complete!\n\n")
             
             self.has_i18n_setup = True
             self.locales_dir = locales_dir
@@ -573,6 +571,8 @@ export default i18n;
                 "2. Import './i18n' in your App.tsx"
             )
         except Exception as e:
+            self.log(f"❌ Setup failed: {str(e)}\n")
+            self.update_progress(0, "Setup failed")
             messagebox.showerror("Error", f"Setup failed:\n{str(e)}")
     
     def update_selected_languages(self):
@@ -595,6 +595,7 @@ export default i18n;
                 ['node_modules', 'dist', 'build', '.git'])]
         
         total = len(files)
+        self.log(f"  Scanning {total} files...\n")
         
         for idx, tsx_file in enumerate(files, 1):
             try:
@@ -605,6 +606,9 @@ export default i18n;
                 # Update progress
                 progress = idx / total
                 self.update_progress(progress, f"Scanning file {idx}/{total}...")
+                
+                if file_findings:
+                    self.log(f"  ✓ {tsx_file.name}: {len(file_findings)} strings\n")
             except:
                 pass
         
@@ -649,6 +653,7 @@ export default i18n;
         used_keys = set()
         
         total = len(strings)
+        self.log(f"  Generating {total} translation keys...\n")
         
         for idx, string_info in enumerate(strings, 1):
             text = string_info['text']
@@ -734,10 +739,14 @@ export default i18n;
         # Translate non-English
         non_en = [l for l in languages if l != 'en']
         if non_en:
+            self.log(f"\n🌍 Translating to {len(non_en)} language(s)...\n")
+            
             for idx, lang in enumerate(non_en, 1):
+                self.log(f"  → {self.SUPPORTED_LANGUAGES[lang]}...\n")
                 self.update_progress(idx / len(non_en), 
                                    f"Translating to {self.SUPPORTED_LANGUAGES[lang]}")
                 self._translate_file(self.locales_dir / f'{lang}.json', lang)
+                self.log(f"    ✓ Complete\n")
     
     def _translate_file(self, filepath: Path, target_lang: str):
         """Translate file"""
@@ -749,29 +758,15 @@ export default i18n;
         with open(filepath, 'w', encoding='utf-8') as f:
             json.dump(translated, f, indent=2, ensure_ascii=False)
     
-    def _translate_dict(self, data: dict, target_lang: str, parent_key: str = '', counter: list = None) -> dict:
-        """Recursively translate dict with progress tracking"""
+    def _translate_dict(self, data: dict, target_lang: str) -> dict:
+        """Recursively translate dict"""
         result = {}
         
-        # Initialize counter on first call
-        if counter is None:
-            counter = [0, self._count_translatable_keys(data)]
-        
         for key, value in data.items():
-            full_key = f"{parent_key}.{key}" if parent_key else key
-            
             if isinstance(value, dict):
-                result[key] = self._translate_dict(value, target_lang, full_key, counter)
+                result[key] = self._translate_dict(value, target_lang)
             elif isinstance(value, str) and value.startswith('[EN] '):
                 original = value[5:]
-                counter[0] += 1
-                
-                # Show progress for each key
-                if self.status_cards and counter[1] > 0:
-                    progress_text = f"{counter[0]}/{counter[1]} {full_key}: {original[:30]}..."
-                    self.status_cards[0].title_label.configure(text=progress_text)
-                    self.root.update()
-                
                 try:
                     translator = GoogleTranslator(source='en', target=target_lang)
                     result[key] = translator.translate(original)
@@ -783,22 +778,14 @@ export default i18n;
         
         return result
     
-    def _count_translatable_keys(self, data: dict) -> int:
-        """Count keys that need translation"""
-        count = 0
-        for value in data.values():
-            if isinstance(value, dict):
-                count += self._count_translatable_keys(value)
-            elif isinstance(value, str) and value.startswith('[EN] '):
-                count += 1
-        return count
-    
     # ===== Code Replacement =====
     
     def replace_in_source_code(self, keys_mapping: Dict):
         """Replace hardcoded text in code with progress"""
         backup_dir = self.backups_dir / datetime.now().strftime('%Y%m%d_%H%M%S')
         backup_dir.mkdir(parents=True, exist_ok=True)
+        
+        self.log(f"📁 Creating backups in: {backup_dir.name}\n")
         
         files_map = defaultdict(list)
         for full_key, info in keys_mapping.items():
@@ -835,6 +822,9 @@ export default i18n;
             if modified_content != content:
                 filepath.write_text(modified_content, encoding='utf-8')
                 modified_count += 1
+                self.log(f"  ✓ {filepath.name}\n")
+        
+        self.log(f"\n✅ Modified {modified_count} file(s)\n")
     
     def _add_i18n_import(self, content: str) -> str:
         """Add import and hook"""
@@ -878,124 +868,255 @@ export default i18n;
     
     # ===== Workflow Actions =====
     
-    # ===== Workflow Actions =====
     def run_detect(self):
+        """Detect step"""
         if not self.validate_project():
             return
+        
+        self.log("\n" + "═"*50 + "\n")
+        self.log("STEP 1: DETECTING HARDCODED TEXT\n")
+        self.log("═"*50 + "\n")
         self.detect_btn.configure(state="disabled")
+        
         def worker():
             try:
-                card = self.add_status_card("���", "Detecting hardcoded text...", "running")
+                self.update_progress(0.1, "Starting detection...")
                 strings = self.detect_hardcoded_text(self.src_dir)
                 self.detected_strings = strings
-                card.title_label.configure(text=f"✓ Found {len(strings)} hardcoded strings")
-                card.set_status("success")
+                
+                self.log(f"\n✅ Found {len(strings)} hardcoded strings\n\n")
+                
                 if strings:
                     self.generate_btn.configure(state="normal")
-                self.update_progress(1.0)
+                    self.log("Preview (first 5):\n")
+                    for i, s in enumerate(strings[:5], 1):
+                        file_name = Path(s['file']).name
+                        self.log(f"  {i}. {file_name}:{s['line']}\n")
+                        self.log(f"     \"{s['text'][:60]}...\"\n")
+                else:
+                    self.log("ℹ️  No hardcoded text detected.\n")
+                
+                self.update_progress(1.0, "Detection complete")
             except Exception as e:
-                messagebox.showerror("Error", str(e))
+                self.log(f"❌ Error: {str(e)}\n")
+                self.update_progress(0, "Error occurred")
             finally:
                 self.detect_btn.configure(state="normal")
+        
         threading.Thread(target=worker, daemon=True).start()
     
     def run_generate(self):
+        """Generate keys step"""
         if not self.detected_strings:
+            messagebox.showwarning("No Data", "Run detection first!")
             return
+        
+        self.log("\n" + "═"*50 + "\n")
+        self.log("STEP 2: GENERATING TRANSLATION KEYS\n")
+        self.log("═"*50 + "\n")
         self.generate_btn.configure(state="disabled")
+        
         def worker():
             try:
-                card = self.add_status_card("���", "Generating translation keys...", "running")
+                self.update_progress(0.1, "Starting key generation...")
                 mapping = self.generate_translation_keys(self.detected_strings)
                 self.generated_keys = mapping
-                card.title_label.configure(text=f"✓ Generated {len(mapping)} keys")
-                card.set_status("success")
+                
+                self.log(f"\n✅ Generated {len(mapping)} keys\n\n")
+                
+                sections = defaultdict(int)
+                for key in mapping.keys():
+                    section = key.split('.')[0]
+                    sections[section] += 1
+                
+                self.log("Keys by section:\n")
+                for section, count in sorted(sections.items()):
+                    self.log(f"  • {section}: {count} keys\n")
+                
                 self.translate_btn.configure(state="normal")
-                self.update_progress(1.0)
+                self.update_progress(1.0, "Key generation complete")
             except Exception as e:
-                messagebox.showerror("Error", str(e))
+                self.log(f"❌ Error: {str(e)}\n")
+                self.update_progress(0, "Error occurred")
             finally:
                 self.generate_btn.configure(state="normal")
+        
         threading.Thread(target=worker, daemon=True).start()
     
     def run_translate(self):
+        """Translate step"""
         if not self.generated_keys:
+            messagebox.showwarning("No Data", "Run key generation first!")
             return
+        
+        self.log("\n" + "═"*50 + "\n")
+        self.log("STEP 3: AUTO-TRANSLATING\n")
+        self.log("═"*50 + "\n")
+        self.log("⏳ This may take a few minutes...\n\n")
         self.translate_btn.configure(state="disabled")
+        
         def worker():
             try:
-                card = self.add_status_card("���", f"Translating to {len(self.selected_languages)} languages...", "running")
-                self.translate_keys_to_languages(self.generated_keys, self.selected_languages)
-                card.title_label.configure(text=f"✓ Translated to {len(self.selected_languages)} languages")
-                card.set_status("success")
+                self.update_progress(0.1, "Starting translation...")
+                self.translate_keys_to_languages(
+                    self.generated_keys,
+                    self.selected_languages
+                )
+                
+                self.log(f"\n✅ Translated to {len(self.selected_languages)} language(s)\n")
                 self.replace_btn.configure(state="normal")
-                self.update_progress(1.0)
+                self.update_progress(1.0, "Translation complete")
             except Exception as e:
-                messagebox.showerror("Error", str(e))
+                self.log(f"❌ Error: {str(e)}\n")
+                self.update_progress(0, "Error occurred")
             finally:
                 self.translate_btn.configure(state="normal")
+        
         threading.Thread(target=worker, daemon=True).start()
     
     def run_replace(self):
+        """Replace step"""
         if not self.generated_keys:
+            messagebox.showwarning("No Data", "Run previous steps first!")
             return
+        
         file_count = len(set(info['file'] for info in self.generated_keys.values()))
-        if not messagebox.askyesno("Confirm", f"Modify {file_count} files?\\n\\nBackups will be created."):
+        response = messagebox.askyesno(
+            "Confirm Changes",
+            f"This will modify {file_count} source files.\n\n"
+            "Backups will be created automatically.\n\n"
+            "Continue?"
+        )
+        
+        if not response:
             return
+        
+        self.log("\n" + "═"*50 + "\n")
+        self.log("STEP 4: UPDATING SOURCE CODE\n")
+        self.log("═"*50 + "\n")
         self.replace_btn.configure(state="disabled")
+        
         def worker():
             try:
-                card = self.add_status_card("✏️", "Updating source code...", "running")
+                self.update_progress(0.1, "Starting code updates...")
                 self.replace_in_source_code(self.generated_keys)
-                card.title_label.configure(text="✅ Code replacement complete!")
-                card.set_status("success")
-                self.update_progress(1.0)
-                messagebox.showinfo("Complete!", f"Workflow finished!\\n\\n• {len(self.detected_strings)} strings\\n• {len(self.generated_keys)} keys\\n• {len(self.selected_languages)} languages")
+                
+                self.log("\n✅ Code replacement complete!\n")
+                self.update_progress(1.0, "All done!")
+                
+                messagebox.showinfo(
+                    "Complete!",
+                    f"Workflow finished! 🎉\n\n"
+                    f"• {len(self.detected_strings)} strings detected\n"
+                    f"• {len(self.generated_keys)} keys generated\n"
+                    f"• {len(self.selected_languages)} languages\n\n"
+                    "Your code now uses i18n!"
+                )
             except Exception as e:
-                messagebox.showerror("Error", str(e))
+                self.log(f"❌ Error: {str(e)}\n")
+                self.update_progress(0, "Error occurred")
             finally:
                 self.replace_btn.configure(state="normal")
+        
         threading.Thread(target=worker, daemon=True).start()
     
     def run_complete_workflow(self):
+        """Run all steps with real-time progress"""
         if not self.validate_project():
             return
-        if not messagebox.askyesno("Run Complete Workflow", f"This will:\\n1. Detect all hardcoded text\\n2. Generate keys\\n3. Translate to {len(self.selected_languages)} languages\\n4. Update code\\n\\nContinue?"):
+        
+        response = messagebox.askyesno(
+            "Run Complete Workflow",
+            f"This will:\n"
+            f"1. Detect all hardcoded text\n"
+            f"2. Generate translation keys\n"
+            f"3. Translate to {len(self.selected_languages)} languages\n"
+            f"4. Update your source code\n\n"
+            "Backups will be created.\n\n"
+            "Continue?"
+        )
+        
+        if not response:
             return
+        
+        self.log("\n" + "═"*50 + "\n")
+        self.log("🚀 COMPLETE WORKFLOW STARTING\n")
+        self.log("═"*50 + "\n\n")
+        
+        # Disable all buttons
         self.workflow_btn.configure(state="disabled")
-        for btn in [self.detect_btn, self.generate_btn, self.translate_btn, self.replace_btn]:
-            btn.configure(state="disabled")
+        self.detect_btn.configure(state="disabled")
+        self.generate_btn.configure(state="disabled")
+        self.translate_btn.configure(state="disabled")
+        self.replace_btn.configure(state="disabled")
+        
         def worker():
             try:
-                c1 = self.add_status_card("1️⃣", "Detecting text...", "running")
+                # Step 1
+                self.log("STEP 1/4: DETECTING TEXT\n")
+                self.log("─" * 50 + "\n")
+                self.update_progress(0.1, "Step 1/4: Detecting...")
+                
                 strings = self.detect_hardcoded_text(self.src_dir)
                 self.detected_strings = strings
-                c1.title_label.configure(text=f"✓ Found {len(strings)} strings")
-                c1.set_status("success")
+                self.log(f"✓ Found {len(strings)} strings\n\n")
+                
                 if not strings:
-                    self.update_progress(1.0)
+                    self.log("ℹ️  No hardcoded text to process.\n")
+                    self.update_progress(1.0, "Nothing to process")
                     return
-                c2 = self.add_status_card("2️⃣", "Generating keys...", "running")
+                
+                # Step 2
+                self.log("STEP 2/4: GENERATING KEYS\n")
+                self.log("─" * 50 + "\n")
+                self.update_progress(0.3, "Step 2/4: Generating keys...")
+                
                 mapping = self.generate_translation_keys(strings)
                 self.generated_keys = mapping
-                c2.title_label.configure(text=f"✓ Generated {len(mapping)} keys")
-                c2.set_status("success")
-                c3 = self.add_status_card("3️⃣", "Translating...", "running")
+                self.log(f"✓ Generated {len(mapping)} keys\n\n")
+                
+                # Step 3
+                self.log("STEP 3/4: TRANSLATING\n")
+                self.log("─" * 50 + "\n")
+                self.update_progress(0.5, "Step 3/4: Translating...")
+                
                 self.translate_keys_to_languages(mapping, self.selected_languages)
-                c3.title_label.configure(text=f"✓ Translated to {len(self.selected_languages)} languages")
-                c3.set_status("success")
-                c4 = self.add_status_card("4️⃣", "Updating code...", "running")
+                self.log(f"✓ Translated to {len(self.selected_languages)} languages\n\n")
+                
+                # Step 4
+                self.log("STEP 4/4: UPDATING CODE\n")
+                self.log("─" * 50 + "\n")
+                self.update_progress(0.8, "Step 4/4: Updating code...")
+                
                 self.replace_in_source_code(mapping)
-                c4.title_label.configure(text="✅ Complete!")
-                c4.set_status("success")
-                self.update_progress(1.0)
-                messagebox.showinfo("Success!", f"Workflow complete!\\n\\n• {len(strings)} strings\\n• {len(mapping)} keys\\n• {len(self.selected_languages)} languages")
+                self.log("✓ Code updated\n\n")
+                
+                self.log("═" * 50 + "\n")
+                self.log("🎉 WORKFLOW COMPLETE!\n")
+                self.log("═" * 50 + "\n")
+                
+                self.update_progress(1.0, "Workflow complete!")
+                
+                messagebox.showinfo(
+                    "Success!",
+                    f"Complete workflow finished! 🎉\n\n"
+                    f"• {len(strings)} strings detected\n"
+                    f"• {len(mapping)} keys generated\n"
+                    f"• {len(self.selected_languages)} languages\n\n"
+                    "Your project is now internationalized!"
+                )
             except Exception as e:
-                messagebox.showerror("Error", str(e))
+                self.log(f"\n❌ Workflow failed: {str(e)}\n")
+                self.update_progress(0, "Workflow failed")
+                messagebox.showerror("Error", f"Workflow failed:\n{str(e)}")
             finally:
                 self.workflow_btn.configure(state="normal")
                 self.detect_btn.configure(state="normal")
+        
         threading.Thread(target=worker, daemon=True).start()
+    
+    # ===== Helpers =====
+    
     def validate_project(self):
         """Validate project setup"""
         if not self.project_path:
