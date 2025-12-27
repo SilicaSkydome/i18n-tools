@@ -23,5 +23,5 @@ if errorlevel 1 (
 )
 
 REM Launch app without console window
-start "" pythonw i18n_manager.py
+start "" pythonw i18n_manager_modern.py
 exit
