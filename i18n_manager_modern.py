@@ -290,8 +290,31 @@ class I18nManager:
         # Reject everything else (lowercase single words not in common list)
         return False
     
+    def _deduplicate_strings(self, strings: List[Dict]) -> List[Dict]:
+        """Remove duplicate texts, keeping first occurrence"""
+        seen_texts = {}
+        deduplicated = []
+        
+        for string_info in strings:
+            text = string_info['text'].strip()
+            # Normalize whitespace for comparison
+            normalized = ' '.join(text.split())
+            
+            if normalized not in seen_texts:
+                seen_texts[normalized] = True
+                deduplicated.append(string_info)
+        
+        duplicates_removed = len(strings) - len(deduplicated)
+        if duplicates_removed > 0 and self.on_progress:
+            self.on_progress(0.0, f"Removed {duplicates_removed} duplicate string(s)")
+        
+        return deduplicated
+    
     def generate_translation_keys(self, strings: List[Dict]) -> Dict[str, Dict]:
         """Generate keys from strings"""
+        # Deduplicate first to prevent duplicate keys
+        strings = self._deduplicate_strings(strings)
+        
         mapping = {}
         used_keys = set()
         
@@ -378,6 +401,105 @@ class I18nManager:
                 result[key] = target.get(key, f'[SRC] {value}')
         
         return result
+    
+    def validate_locale_files(self) -> Dict[str, any]:
+        """Validate locale files for duplicates and other issues"""
+        if not self.locales_dir or not self.locales_dir.exists():
+            return {'valid': False, 'error': 'No locales directory found'}
+        
+        issues = []
+        stats = {}
+        
+        for lang_file in self.locales_dir.glob('*.json'):
+            with open(lang_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            # Flatten the nested structure
+            all_values = []
+            def flatten(d, prefix=''):
+                for k, v in d.items():
+                    if isinstance(v, dict):
+                        flatten(v, f"{prefix}{k}.")
+                    else:
+                        all_values.append((f"{prefix}{k}", v))
+            flatten(data)
+            
+            # Check for duplicate values
+            value_counts = {}
+            for key, value in all_values:
+                # Normalize and clean the value
+                clean_value = value.replace('[SRC] ', '').strip()
+                clean_value = ' '.join(clean_value.split())  # normalize whitespace
+                
+                if clean_value not in value_counts:
+                    value_counts[clean_value] = []
+                value_counts[clean_value].append(key)
+            
+            duplicates = {val: keys for val, keys in value_counts.items() if len(keys) > 1}
+            
+            stats[lang_file.stem] = {
+                'total_keys': len(all_values),
+                'unique_values': len(value_counts),
+                'duplicate_count': sum(len(keys) - 1 for keys in duplicates.values()),
+                'duplicates': duplicates if duplicates else None
+            }
+            
+            if duplicates:
+                issues.append(f"{lang_file.name}: {len(duplicates)} values have duplicates")
+        
+        return {
+            'valid': len(issues) == 0,
+            'issues': issues,
+            'stats': stats
+        }
+    
+    def remove_duplicate_keys_from_locales(self) -> int:
+        """Remove duplicate keys from locale files, keeping first occurrence"""
+        if not self.locales_dir or not self.locales_dir.exists():
+            return 0
+        
+        total_removed = 0
+        
+        for lang_file in self.locales_dir.glob('*.json'):
+            with open(lang_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            # Track seen values and keys to remove
+            seen_values = {}
+            keys_to_remove = []
+            
+            def process_dict(d, prefix=''):
+                nonlocal total_removed
+                for k, v in list(d.items()):
+                    full_key = f"{prefix}{k}"
+                    if isinstance(v, dict):
+                        process_dict(v, f"{full_key}.")
+                    else:
+                        # Normalize value
+                        clean_value = v.replace('[SRC] ', '').strip()
+                        clean_value = ' '.join(clean_value.split())
+                        
+                        if clean_value in seen_values:
+                            # Duplicate found - mark for removal
+                            keys_to_remove.append((d, k))
+                            total_removed += 1
+                        else:
+                            seen_values[clean_value] = full_key
+            
+            process_dict(data)
+            
+            # Remove duplicates
+            for parent_dict, key in keys_to_remove:
+                del parent_dict[key]
+            
+            # Clean up empty sections
+            data = {k: v for k, v in data.items() if v}  # Remove empty dicts
+            
+            # Write back
+            with open(lang_file, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+        
+        return total_removed
     
     def translate_to_languages(self, keys_mapping: Dict, languages: List[str]):
         """Translate to languages"""
@@ -1187,6 +1309,32 @@ export default i18n;
                 set_busy(True, "Validating translations...")
                 add_status_card(ft.Icons.VERIFIED, "Validating translations...", status="running")
                 
+                # Check for duplicate keys
+                locale_results = manager.validate_locale_files()
+                
+                if not locale_results.get('valid'):
+                    total_duplicates = sum(s.get('duplicate_count', 0) for s in locale_results.get('stats', {}).values())
+                    if total_duplicates > 0:
+                        add_status_card(
+                            ft.Icons.WARNING_AMBER, 
+                            f"Found {total_duplicates} duplicate keys!", 
+                            "Click 'Remove Duplicates' button to clean up.",
+                            status="warning"
+                        )
+                        
+                        # Show stats per language
+                        for lang, stats in locale_results.get('stats', {}).items():
+                            if stats.get('duplicate_count', 0) > 0:
+                                add_status_card(
+                                    ft.Icons.COPY_ALL,
+                                    f"{lang}.json: {stats['total_keys']} keys → {stats['unique_values']} unique values",
+                                    f"{stats['duplicate_count']} duplicates found",
+                                    status="info"
+                                )
+                else:
+                    add_status_card(ft.Icons.CHECK_CIRCLE, "No duplicate keys found!", status="success")
+                
+                # Check for missing translations
                 results = manager.validate_translations()
                 
                 if 'error' in results:
@@ -1206,6 +1354,37 @@ export default i18n;
                                 )
             except Exception as ex:
                 add_status_card(ft.Icons.ERROR, f"Validation failed: {str(ex)}", status="warning")
+            finally:
+                set_busy(False, "")
+        
+        threading.Thread(target=worker, daemon=True).start()
+    
+    def run_remove_duplicates(e):
+        """Remove duplicate keys from locale files"""
+        if busy:
+            return
+        if not manager.project_path or not manager.has_i18n_setup:
+            add_status_card(ft.Icons.ERROR, "Please select a project with i18n setup first", status="warning")
+            return
+        
+        def worker():
+            try:
+                set_busy(True, "Removing duplicates...")
+                add_status_card(ft.Icons.CLEANING_SERVICES, "Removing duplicate keys...", status="running")
+                
+                removed = manager.remove_duplicate_keys_from_locales()
+                
+                if removed > 0:
+                    add_status_card(
+                        ft.Icons.CHECK_CIRCLE, 
+                        f"Removed {removed} duplicate keys!", 
+                        "Your locale files are now cleaned up.",
+                        status="success"
+                    )
+                else:
+                    add_status_card(ft.Icons.INFO, "No duplicates to remove", status="info")
+            except Exception as ex:
+                add_status_card(ft.Icons.ERROR, f"Cleanup failed: {str(ex)}", status="warning")
             finally:
                 set_busy(False, "")
         
@@ -1378,7 +1557,8 @@ export default i18n;
             create_action_card("Sync Keys", "Sync keys across all languages.", ft.Icons.SYNC, run_sync),
             create_action_card("Translate", "Auto-translate using Google Translate.", ft.Icons.TRANSLATE, run_translate),
             create_action_card("Replace Code", "Update source code with t() calls.", ft.Icons.EDIT, run_replace),
-            create_action_card("Validate", "Check for missing translations.", ft.Icons.VERIFIED, run_validate),
+            create_action_card("Validate", "Check for missing translations & duplicates.", ft.Icons.VERIFIED, run_validate),
+            create_action_card("Remove Duplicates", "Clean up duplicate keys in locale files.", ft.Icons.CLEANING_SERVICES, run_remove_duplicates),
         ], spacing=20, run_spacing=20)
 
         # Setup Card (Conditional)
