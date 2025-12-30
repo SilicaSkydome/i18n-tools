@@ -17,6 +17,55 @@ from typing import List, Dict, Optional
 import sys
 import ctypes
 import os
+import inspect
+
+
+def _pick_directory_native(dialog_title: str) -> Optional[str]:
+    """Pick a directory using a native OS dialog (best-effort).
+
+    This avoids depending on Flet client-side controls (e.g., FilePicker), which can
+    mismatch in packaged builds.
+    """
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            # Keep dialog above the app window
+            root.attributes("-topmost", True)
+        except Exception:
+            pass
+        path = filedialog.askdirectory(title=dialog_title)
+        try:
+            root.destroy()
+        except Exception:
+            pass
+        return path or None
+    except Exception:
+        return None
+
+
+def _infer_lang_from_locale_stem(stem: str, supported: set[str]) -> Optional[str]:
+    """Infer a language code from a locale filename stem.
+
+    Supports:
+    - "en" -> "en"
+    - "crypto-en" -> "en"
+    - "crypto_en" -> "en"
+    """
+    s = (stem or "").strip().lower()
+    if not s:
+        return None
+    if s in supported:
+        return s
+    for sep in ("-", "_"):
+        if sep in s:
+            tail = s.split(sep)[-1]
+            if tail in supported:
+                return tail
+    return None
 
 # Auto-install dependencies
 try:
@@ -245,7 +294,11 @@ class I18nManager:
         marker = '[SRC] '
         source_lang = self.source_language or 'en'
 
-        for lang in languages:
+        total_steps = max(1, len(languages))
+        if self.on_progress:
+            self.on_progress(0.0, f"Preparing {len(languages)} locale file(s)...")
+
+        for idx, lang in enumerate(languages, 1):
             lang_file = self.locales_dir / f'{lang}.json'
             
             if lang_file.exists():
@@ -268,11 +321,19 @@ class I18nManager:
             
             with open(lang_file, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
+
+            if self.on_progress:
+                self.on_progress(min(0.5, idx / (total_steps * 2)), f"Wrote {lang}.json")
         
         # Auto-translate
         targets = [l for l in languages if l != source_lang]
-        for lang in targets:
+        translate_total = max(1, len(targets))
+        for idx, lang in enumerate(targets, 1):
+            if self.on_progress:
+                self.on_progress(0.5 + (idx - 1) / (translate_total * 2), f"Translating {lang}...")
             self._translate_file(self.locales_dir / f'{lang}.json', lang, source_lang, marker)
+            if self.on_progress:
+                self.on_progress(0.5 + idx / (translate_total * 2), f"Translated {lang}")
     
     def _translate_file(self, filepath: Path, target_lang: str, source_lang: str, marker: str):
         """Translate file"""
@@ -516,10 +577,27 @@ def main(page: ft.Page):
     selected_languages = ['en']
     source_language = 'en'
     project_selected = False
+
+    busy = False
+
+    action_run_buttons: list[ft.Control] = []
+
+    def update_action_availability():
+        """Enable/disable action buttons based on selection state."""
+        enabled = bool((not busy) and project_selected and manager.project_path and manager.src_dir)
+        for btn in action_run_buttons:
+            try:
+                btn.disabled = not enabled
+                btn.update()
+            except Exception:
+                pass
     
     # UI Elements
     project_path_text = ft.Text("No project selected", color="onSurfaceVariant")
     status_text = ft.Text("Select a project to begin", color="onSurfaceVariant")
+
+    # Lazy FilePicker fallback (not used by default; native picker is more reliable in packaged builds)
+    project_picker: Optional[ft.FilePicker] = None
     
     # Status cards column
     status_cards = ft.Column(scroll=ft.ScrollMode.AUTO, spacing=8, expand=True)
@@ -561,10 +639,18 @@ def main(page: ft.Page):
     
     def update_progress(value: float, text: str = ""):
         """Update progress bar"""
+        # value can be None for indeterminate
         progress_bar.value = value
-        progress_bar.visible = value < 1.0
+        progress_bar.visible = (value is None) or (value < 1.0)
         progress_text.value = text
         page.update()
+
+    def set_busy(is_busy: bool, text: str = ""):
+        nonlocal busy
+        busy = is_busy
+        update_progress(None if is_busy else 1.0, text)
+        update_action_availability()
+        refresh_language_controls()
     
     # Language selection
     language_checks = {}
@@ -577,7 +663,7 @@ def main(page: ft.Page):
             selected_languages.append(source_language)
 
         for code, cb in language_checks.items():
-            cb.disabled = (not project_selected) or (code == source_language)
+            cb.disabled = busy or (not project_selected) or (code == source_language)
             cb.value = (code in selected_languages)
 
         update_language_chips()
@@ -598,7 +684,7 @@ def main(page: ft.Page):
         for lang in selected_languages:
             if lang != source_language:
                 chip = ft.Chip(
-                    label=ft.Text(manager.SUPPORTED_LANGUAGES[lang]),
+                    label=ft.Text(manager.SUPPORTED_LANGUAGES.get(lang, lang)),
                     on_delete=lambda e, l=lang: remove_language(l),
                     delete_icon=ft.Icons.CLOSE,
                     bgcolor="secondaryContainer",
@@ -663,11 +749,26 @@ def main(page: ft.Page):
     # Project selection
     async def select_project(e):
         """Select project folder"""
-        dialog = ft.FilePicker()
-        page.overlay.append(dialog)
-        page.update()
+        dialog_title = "Select React/TypeScript Project"
 
-        selected_path = dialog.get_directory_path(dialog_title="Select React/TypeScript Project")
+        # Prefer a native OS dialog (works reliably in packaged .exe).
+        selected_path = _pick_directory_native(dialog_title)
+
+        # Fallback to FilePicker only if native dialog isn't available.
+        if not selected_path:
+            nonlocal project_picker
+            if project_picker is None:
+                project_picker = ft.FilePicker()
+                page.overlay.append(project_picker)
+                page.update()
+
+            if hasattr(project_picker, "get_directory_path_async"):
+                selected_path = await project_picker.get_directory_path_async(dialog_title=dialog_title)
+            else:
+                selected_path = project_picker.get_directory_path(dialog_title=dialog_title)
+                if inspect.isawaitable(selected_path):
+                    selected_path = await selected_path
+
         if not selected_path:
             return
 
@@ -696,7 +797,8 @@ def main(page: ft.Page):
             return
 
         project_selected = True
-        source_language_dd.disabled = False
+        source_language_dd.disabled = busy
+        update_action_availability()
         
         # Check i18n setup
         i18n_config = manager.src_dir / 'i18n' / 'config.ts'
@@ -708,30 +810,53 @@ def main(page: ft.Page):
             manager.locales_dir = locales_dir
             
             # Detect languages
-            existing = [f.stem for f in locales_dir.glob('*.json') 
-                       if f.stem not in ('index', 'config')]
-            if existing:
+            stems = [f.stem for f in locales_dir.glob('*.json') if f.stem not in ('index', 'config')]
+
+            supported_codes = set(manager.SUPPORTED_LANGUAGES.keys())
+            inferred_codes: list[str] = []
+            unknown_stems: list[str] = []
+            for stem in stems:
+                code = _infer_lang_from_locale_stem(stem, supported_codes)
+                if code:
+                    inferred_codes.append(code)
+                else:
+                    unknown_stems.append(stem)
+
+            inferred_unique = sorted(set(inferred_codes))
+            if inferred_unique:
                 selected_languages.clear()
-                selected_languages.extend(existing)
-                for lang in existing:
+                selected_languages.extend(inferred_unique)
+
+                for lang in inferred_unique:
                     if lang in language_checks:
                         language_checks[lang].value = True
 
-                # Pick source language from existing locales if possible
-                # Prefer English if present, otherwise first locale
+                # Pick source language from inferred locales if possible
                 nonlocal source_language
-                if 'en' in existing:
+                if 'en' in inferred_unique:
                     source_language = 'en'
                 else:
-                    source_language = existing[0]
+                    source_language = inferred_unique[0]
                 manager.source_language = source_language
                 source_language_dd.value = source_language
                 refresh_language_controls()
             else:
+                # No recognizable language files; keep defaults and let user choose manually
                 manager.source_language = source_language
                 refresh_language_controls()
+
+            if unknown_stems:
+                add_status_card(
+                    ft.Icons.INFO,
+                    "Non-standard locale files detected",
+                    f"Found locale JSON files like: {unknown_stems[0]}.json (and {max(0, len(unknown_stems)-1)} more). "
+                    "Auto-detect may be incomplete; choose languages manually.",
+                    "info",
+                )
             
-            add_status_card(ft.Icons.CHECK_CIRCLE, f"i18n configured", f"{len(existing)} languages", "success")
+            lang_count = len(inferred_unique)
+            subtitle = f"{lang_count} languages detected" if lang_count else f"{len(stems)} locale file(s) found"
+            add_status_card(ft.Icons.CHECK_CIRCLE, "i18n configured", subtitle, "success")
             status_text.value = "✅ Ready to process"
             if hasattr(manager, 'setup_card_ref'):
                 manager.setup_card_ref.visible = False
@@ -827,54 +952,71 @@ export default i18n;
     # Workflow actions
     def run_detect(e):
         """Run detection"""
-        if not manager.project_path or not manager.has_i18n_setup:
-            add_status_card(ft.Icons.ERROR, "Please select a project with i18n setup first", status="warning")
+        if busy:
+            return
+        if not manager.project_path or not manager.src_dir:
+            add_status_card(ft.Icons.ERROR, "Please select a project first", status="warning")
             return
         
         def worker():
             try:
+                set_busy(True, "Detecting hardcoded text...")
                 add_status_card(ft.Icons.SEARCH, "Detecting hardcoded text...", status="running")
                 manager.on_progress = update_progress
                 
                 strings = manager.detect_hardcoded_text(manager.src_dir)
                 manager.detected_strings = strings
+
+                render_detect_results()
                 
                 add_status_card(ft.Icons.CHECK_CIRCLE, f"Found {len(strings)} hardcoded strings", status="success")
                 update_progress(1.0)
             except Exception as ex:
                 add_status_card(ft.Icons.ERROR, f"Detection failed: {str(ex)}", status="warning")
+            finally:
+                set_busy(False, "")
         
         threading.Thread(target=worker, daemon=True).start()
     
     def run_generate(e):
         """Generate keys"""
+        if busy:
+            return
         if not manager.detected_strings:
             add_status_card(ft.Icons.ERROR, "No detected strings. Run 'Detect Text' first", status="warning")
             return
         
         def worker():
             try:
+                set_busy(True, "Generating translation keys...")
                 add_status_card(ft.Icons.KEY, "Generating translation keys...", status="running")
                 manager.on_progress = update_progress
                 
                 mapping = manager.generate_translation_keys(manager.detected_strings)
                 manager.generated_keys = mapping
+
+                render_generated_keys()
                 
                 add_status_card(ft.Icons.CHECK_CIRCLE, f"Generated {len(mapping)} keys", status="success")
                 update_progress(1.0)
             except Exception as ex:
                 add_status_card(ft.Icons.ERROR, f"Key generation failed: {str(ex)}", status="warning")
+            finally:
+                set_busy(False, "")
         
         threading.Thread(target=worker, daemon=True).start()
     
     def run_sync(e):
         """Sync keys"""
+        if busy:
+            return
         if not manager.project_path or not manager.has_i18n_setup:
             add_status_card(ft.Icons.ERROR, "Please select a project with i18n setup first", status="warning")
             return
         
         def worker():
             try:
+                set_busy(True, "Syncing translation keys...")
                 add_status_card(ft.Icons.SYNC, "Synchronizing translation keys...", status="running")
                 
                 manager.sync_translation_keys()
@@ -882,37 +1024,54 @@ export default i18n;
                 add_status_card(ft.Icons.CHECK_CIRCLE, f"Synced keys across {len(selected_languages)} languages", status="success")
             except Exception as ex:
                 add_status_card(ft.Icons.ERROR, f"Sync failed: {str(ex)}", status="warning")
+            finally:
+                set_busy(False, "")
         
         threading.Thread(target=worker, daemon=True).start()
     
     def run_translate(e):
         """Run translation"""
+        if busy:
+            return
         if not manager.generated_keys:
             add_status_card(ft.Icons.ERROR, "No generated keys. Run 'Generate Keys' first", status="warning")
+            return
+        if not manager.project_path or not manager.has_i18n_setup:
+            add_status_card(ft.Icons.ERROR, "Please select a project with i18n setup first", status="warning")
             return
         
         def worker():
             try:
+                set_busy(True, "Translating...")
                 add_status_card(ft.Icons.TRANSLATE, f"Translating to {len(selected_languages)} languages...", status="running")
                 
                 manager.selected_languages = selected_languages
                 manager.source_language = source_language
+                manager.on_progress = update_progress
                 manager.translate_to_languages(manager.generated_keys, selected_languages)
                 
                 add_status_card(ft.Icons.CHECK_CIRCLE, f"Translated to {len(selected_languages)} languages", status="success")
             except Exception as ex:
                 add_status_card(ft.Icons.ERROR, f"Translation failed: {str(ex)}", status="warning")
+            finally:
+                set_busy(False, "")
         
         threading.Thread(target=worker, daemon=True).start()
     
     def run_replace(e):
         """Run code replacement"""
+        if busy:
+            return
         if not manager.generated_keys:
             add_status_card(ft.Icons.ERROR, "No generated keys. Run 'Generate Keys' first", status="warning")
+            return
+        if not manager.project_path or not manager.has_i18n_setup:
+            add_status_card(ft.Icons.ERROR, "Please select a project with i18n setup first", status="warning")
             return
         
         def worker():
             try:
+                set_busy(True, "Updating source code...")
                 add_status_card(ft.Icons.EDIT, "Updating source code...", status="running")
                 
                 manager.replace_in_source_code(manager.generated_keys)
@@ -920,17 +1079,22 @@ export default i18n;
                 add_status_card(ft.Icons.CHECK_CIRCLE, "Code replacement complete!", status="success")
             except Exception as ex:
                 add_status_card(ft.Icons.ERROR, f"Replacement failed: {str(ex)}", status="warning")
+            finally:
+                set_busy(False, "")
         
         threading.Thread(target=worker, daemon=True).start()
     
     def run_validate(e):
         """Run validation"""
+        if busy:
+            return
         if not manager.project_path or not manager.has_i18n_setup:
             add_status_card(ft.Icons.ERROR, "Please select a project with i18n setup first", status="warning")
             return
         
         def worker():
             try:
+                set_busy(True, "Validating translations...")
                 add_status_card(ft.Icons.VERIFIED, "Validating translations...", status="running")
                 
                 results = manager.validate_translations()
@@ -952,8 +1116,56 @@ export default i18n;
                                 )
             except Exception as ex:
                 add_status_card(ft.Icons.ERROR, f"Validation failed: {str(ex)}", status="warning")
+            finally:
+                set_busy(False, "")
         
         threading.Thread(target=worker, daemon=True).start()
+
+    # Review UI state (Detect + Generate)
+    detect_summary = ft.Text("No results yet.", color="onSurfaceVariant")
+    detect_results_list = ft.ListView(expand=True, spacing=6, height=360)
+
+    def render_detect_results():
+        detect_results_list.controls.clear()
+        total = len(manager.detected_strings or [])
+        shown = min(total, 300)
+        detect_summary.value = f"Showing {shown} of {total} result(s)" if total else "No results yet."
+
+        for item in (manager.detected_strings or [])[:shown]:
+            file_short = Path(item.get('file', '')).name
+            line_no = item.get('line', '?')
+            ctx = item.get('context', '')
+            text = item.get('text', '')
+            detect_results_list.controls.append(
+                ft.ListTile(
+                    title=ft.Text(text, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS),
+                    subtitle=ft.Text(f"{file_short}:{line_no} · {ctx}", color="onSurfaceVariant"),
+                    dense=True,
+                )
+            )
+
+        page.update()
+
+    keys_summary = ft.Text("No keys yet.", color="onSurfaceVariant")
+    keys_results_list = ft.ListView(expand=True, spacing=6, height=360)
+
+    def render_generated_keys():
+        keys_results_list.controls.clear()
+        total = len(manager.generated_keys or {})
+        shown = min(total, 300)
+        keys_summary.value = f"Showing {shown} of {total} key(s)" if total else "No keys yet."
+
+        for key, info in list((manager.generated_keys or {}).items())[:shown]:
+            text = (info or {}).get('text', '')
+            keys_results_list.controls.append(
+                ft.ListTile(
+                    title=ft.Text(key, weight=ft.FontWeight.W_500),
+                    subtitle=ft.Text(text, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS, color="onSurfaceVariant"),
+                    dense=True,
+                )
+            )
+
+        page.update()
     
     # Navigation rail with Material Design 3 icons
     rail = ft.NavigationRail(
@@ -1016,8 +1228,8 @@ export default i18n;
         
         views = [
             create_project_view(),
-            create_action_view("Detect Hardcoded Text", "Scan your TypeScript/React files for hardcoded user-facing text that should be translated.", ft.Icons.SEARCH, run_detect),
-            create_action_view("Generate Translation Keys", "Generate semantic translation keys for all detected strings.", ft.Icons.KEY, run_generate),
+            create_detect_view(),
+            create_generate_view(),
             create_action_view("Sync Translation Keys", "Synchronize translation keys across all language files.", ft.Icons.SYNC, run_sync),
             create_action_view("Auto-Translate", "Automatically translate all keys to selected languages using Google Translate.", ft.Icons.TRANSLATE, run_translate),
             create_action_view("Update Source Code", "Replace hardcoded text in your source code with t() function calls.", ft.Icons.EDIT, run_replace),
@@ -1032,13 +1244,21 @@ export default i18n;
         
         # Action Card Component
         def create_action_card(title, description, icon, on_click, color="primaryContainer"):
+            run_btn = ft.FilledButton(
+                "Run",
+                icon=ft.Icons.PLAY_ARROW,
+                on_click=on_click,
+                width=float("inf"),
+                disabled=(not project_selected) or busy,
+            )
+            action_run_buttons.append(run_btn)
             return ft.Container(
                 content=ft.Column([
                     ft.Icon(icon, size=40, color="primary"),
                     ft.Text(title, size=18, weight=ft.FontWeight.BOLD, color="onSurface"),
                     ft.Text(description, size=12, color="onSurfaceVariant", no_wrap=False, max_lines=3, overflow=ft.TextOverflow.ELLIPSIS),
                     ft.Container(expand=True), # Spacer
-                    ft.FilledButton("Run", icon=ft.Icons.PLAY_ARROW, on_click=on_click, width=float("inf"), disabled=not project_selected)
+                    run_btn
                 ], spacing=10),
                 padding=20,
                 bgcolor="surface",
@@ -1061,6 +1281,7 @@ export default i18n;
             e.control.update()
 
         # Grid of actions
+        action_run_buttons.clear()
         actions_grid = ft.ResponsiveRow([
             create_action_card("Detect Text", "Scan project for hardcoded strings.", ft.Icons.SEARCH, run_detect),
             create_action_card("Generate Keys", "Create semantic translation keys.", ft.Icons.KEY, run_generate),
@@ -1147,7 +1368,7 @@ export default i18n;
                             icon=icon_name,
                             on_click=action,
                             height=48,
-                            disabled=not project_selected,
+                            disabled=(not project_selected) or busy,
                         ),
                     ], spacing=20, horizontal_alignment=ft.CrossAxisAlignment.CENTER),
                     padding=40,
@@ -1156,6 +1377,48 @@ export default i18n;
                 )
             ),
         ], spacing=16, scroll=ft.ScrollMode.AUTO, horizontal_alignment=ft.CrossAxisAlignment.CENTER)
+
+    def create_detect_view():
+        return ft.Column(
+            [
+                ft.Text("Detect Hardcoded Text", size=28, weight=ft.FontWeight.BOLD, color="onSurface"),
+                ft.Text("Run detection, then review what was found.", color="onSurfaceVariant"),
+                ft.FilledButton(
+                    "Detect",
+                    icon=ft.Icons.SEARCH,
+                    on_click=run_detect,
+                    height=48,
+                    disabled=(not project_selected) or busy,
+                ),
+                ft.Divider(height=16, color="transparent"),
+                ft.Text("Results", size=18, weight=ft.FontWeight.BOLD, color="onSurface"),
+                detect_summary,
+                ft.Container(content=detect_results_list, bgcolor="surface", border_radius=12, padding=12),
+            ],
+            spacing=12,
+            scroll=ft.ScrollMode.AUTO,
+        )
+
+    def create_generate_view():
+        return ft.Column(
+            [
+                ft.Text("Generate Translation Keys", size=28, weight=ft.FontWeight.BOLD, color="onSurface"),
+                ft.Text("Generate keys from detected strings, then review the mapping.", color="onSurfaceVariant"),
+                ft.FilledButton(
+                    "Generate",
+                    icon=ft.Icons.KEY,
+                    on_click=run_generate,
+                    height=48,
+                    disabled=(not project_selected) or busy,
+                ),
+                ft.Divider(height=16, color="transparent"),
+                ft.Text("Generated Keys", size=18, weight=ft.FontWeight.BOLD, color="onSurface"),
+                keys_summary,
+                ft.Container(content=keys_results_list, bgcolor="surface", border_radius=12, padding=12),
+            ],
+            spacing=12,
+            scroll=ft.ScrollMode.AUTO,
+        )
     
     # Status panel
     status_panel = ft.Container(
