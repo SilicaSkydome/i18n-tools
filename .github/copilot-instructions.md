@@ -15,6 +15,7 @@ A **standalone desktop application** for automating React/TypeScript i18n workfl
 
 ### Technology Stack
 - **Python 3.10+** | **Flet** (Material Design 3) | **deep-translator** (Google Translate) | **PyInstaller** (one-file `.exe`)
+- **Truly Standalone**: No runtime installations, all dependencies bundled (~84 MB .exe)
 
 ### Key Classes & Methods
 ```python
@@ -61,9 +62,12 @@ pip install -r requirements.txt
 # Run directly (for testing)
 python i18n_manager_modern.py
 
-# Build after changes
-python -m PyInstaller --noconfirm --onefile --windowed ... (see above)
+# Quick build (recommended)
+build.bat  # Windows
+./build.sh # Linux/macOS
 ```
+
+**Critical**: Never add runtime dependency installation (e.g., `subprocess.check_call([sys.executable, '-m', 'pip', 'install', ...])`) - it breaks standalone builds. All dependencies must be bundled via PyInstaller.
 
 ## Project-Specific Patterns
 

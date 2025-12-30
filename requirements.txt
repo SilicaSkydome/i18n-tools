@@ -1,14 +1,14 @@
 # i18n Manager - Standalone Application
 # Version 3.0 Requirements
 
-# Translation library (auto-translates text)
+# Translation library (Google Translate API)
 deep-translator>=1.11.4
 
-# Modern UI library (replaces standard tkinter)
-customtkinter>=5.2.0
+# Modern UI library (Material Design 3)
+flet>=0.25.0
 
-# For creating .exe files (optional)
-# pyinstaller>=6.0.0
+# For creating standalone .exe files
+pyinstaller>=6.0.0
 
-# Note: customtkinter provides modern UI with dark mode
-# No need for standard tkinter anymore!
+# Note: All dependencies are bundled into the .exe
+# Users don't need Python or any libraries installed!

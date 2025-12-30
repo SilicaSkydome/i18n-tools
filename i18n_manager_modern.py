@@ -67,13 +67,8 @@ def _infer_lang_from_locale_stem(stem: str, supported: set[str]) -> Optional[str
                 return tail
     return None
 
-# Auto-install dependencies
-try:
-    from deep_translator import GoogleTranslator
-except ImportError:
-    import subprocess
-    subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'deep-translator'])
-    from deep_translator import GoogleTranslator
+# Import required dependencies (bundled by PyInstaller)
+from deep_translator import GoogleTranslator
 
 
 class I18nManager:
@@ -89,25 +84,66 @@ class I18nManager:
     }
     
     SAFE_CONTEXTS = {
-        # JSX Text: >Text<
-        'jsx_text': r'>([^<>{}\n]+)<',
+        # ONLY JSX text - must start with capital OR be multiple words
+        # Excludes { } and special characters that indicate code
+        'jsx_text': r'>\s*([A-Z][a-zA-Z0-9\s!?.,;:\'"()-]+|[A-Za-z][a-zA-Z0-9]*(?:\s+[A-Za-z][a-zA-Z0-9!?.,;:\'"()-]*)+)\s*<',
         
-        # Attributes: title="Text", alt="Text", etc.
-        'jsx_attr': r'(?:title|alt|placeholder|aria-label|label|description|tooltip|caption|text|error|success|warning|info|help)\s*=\s*["\']([^"\']+)["\']',
-        
-        # Object Properties (common text fields): label: "Text", message: "Text"
-        'obj_property': r'(?:label|title|description|message|error|header|content|tooltip|text|name|caption|body|footer)\s*:\s*["\']([^"\']+)["\']',
+        # ONLY these specific JSX attributes
+        'jsx_attr': r'<[^>]*?\s(?:title|alt|placeholder|aria-label|tooltip)=["\']([ A-Za-z0-9!?.,;:\'"()-]+)["\']',
     }
     
     TECHNICAL_PATTERNS = [
-        r'^[a-z_]+$', r'^[A-Z_]+$', r'^[a-z][a-zA-Z0-9]*$',
-        r'^/[a-zA-Z0-9/_-]*$', r'^\./|\.\./', r'className=',
-        r'^(text|bg|border|flex|grid|gap|p|m|w|h|rounded|shadow)-',
-        r'\.(jpg|jpeg|png|gif|svg|webp|mp4|pdf|json|xml|csv|tsx|jsx|ts|js|css|html)$',
-        r'^https?://', r'^#[0-9a-fA-F]{3,8}$', r't\(["\']',
-        r'^(GET|POST|PUT|DELETE|PATCH|OPTIONS|HEAD)$',
-        r'^(auto|inherit|initial|unset|none|block|inline|flex|grid|hidden)$',
-        r'^(px|rem|em|vh|vw|%)$',
+        # Variable/constant patterns (stricter)
+        r'^[a-z_]+$',  # lowercase_only
+        r'^[A-Z_]+$',  # UPPERCASE_ONLY
+        r'^[a-z][a-zA-Z0-9]*$',  # camelCase (single word)
+        r'^[a-z_][a-z0-9_]*$',  # snake_case
+        
+        # Common code patterns and status values
+        r'^(pending|loading|success|error|warning|info|active|inactive|disabled|enabled)$',
+        r'^(in_progress|completed|failed|rejected|approved|cancelled|draft|published)$',
+        r'^(default|primary|secondary|tertiary|danger|safe|neutral)$',
+        r'^(true|false|null|undefined|void|NaN)$',
+        r'^(asc|desc|ascending|descending|left|right|center|top|bottom|middle)$',
+        r'^(created|updated|deleted|modified|read|write|execute)$',
+        
+        # Paths and URLs
+        r'^/[a-zA-Z0-9/_-]*$',  # /paths/like/this
+        r'^\./|\.\./',  # ../relative/paths
+        r'^https?://',  # URLs
+        r'^www\.',  # www.example.com
+        
+        # CSS and styling
+        r'className=',
+        r'^(text|bg|border|flex|grid|gap|p|m|w|h|rounded|shadow|font|leading|tracking|space|divide|ring|outline|cursor|pointer|select|appearance|resize|justify|items|content|self|order|shrink|grow|basis)-',
+        r'^#[0-9a-fA-F]{3,8}$',  # hex colors
+        r'^rgba?\(',  # rgb/rgba colors
+        
+        # File extensions and types
+        r'\.(jpg|jpeg|png|gif|svg|webp|ico|mp4|mp3|wav|pdf|json|xml|csv|tsx|jsx|ts|js|css|scss|sass|less|html|md|txt|zip|tar|gz)$',
+        r'^(json|xml|csv|html|text|image|video|audio|application)$',
+        
+        # Already translated
+        r't\(["\']',  # t('key')
+        r'i18n\.',  # i18n.t() or similar
+        
+        # HTTP and API
+        r'^(GET|POST|PUT|DELETE|PATCH|OPTIONS|HEAD|CONNECT|TRACE)$',
+        r'^(application|multipart|form-data|urlencoded|boundary)$',
+        r'^(Bearer|Basic|Digest|OAuth)$',
+        
+        # CSS values and units
+        r'^(auto|inherit|initial|unset|none|block|inline|flex|grid|hidden|visible|absolute|relative|fixed|sticky|static)$',
+        r'^\d+(\.\d+)?(px|rem|em|vh|vw|%|pt|cm|mm|in|deg|rad|s|ms)$',
+        r'^(px|rem|em|vh|vw|%|pt|cm|mm)$',
+        
+        # Common non-translatable
+        r'^\d+$',  # pure numbers
+        r'^\d+\.\d+$',  # decimals
+        r'^[A-Z]{2,}$',  # acronyms like API, URL, ID
+        r'\$\{',  # template literals ${}
+        r'^[a-f0-9]{8,}$',  # hashes/IDs (8+ chars)
+        r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',  # UUIDs
     ]
     
     def __init__(self):
@@ -173,32 +209,86 @@ class I18nManager:
         return findings
     
     def _is_user_facing(self, text: str) -> bool:
-        """Check if text is user-facing"""
+        """Check if text is user-facing with improved detection"""
+        # Strip whitespace for analysis
+        text = text.strip()
+        
         # Basic length check
-        if len(text) < 2 or len(text) > 500:
+        if len(text) < 1 or len(text) > 500:
             return False
-            
-        # Ignore if it looks like a variable or constant (camelCase or ALL_CAPS)
-        # But allow if it contains spaces (likely a sentence)
-        if ' ' not in text:
-            if text.isupper(): # CONSTANT_VALUE
-                return False
-            if text[0].islower() and any(c.isupper() for c in text): # camelCase
-                return False
-            if '_' in text or '-' in text: # snake_case or kebab-case
+        
+        # CRITICAL: Reject code patterns immediately
+        code_indicators = [
+            '===', '!==', '==', '!=',  # Comparisons
+            '=>', '->', '...', '&&', '||',  # Operators
+            'case ', 'default:', 'switch', 'if ', 'else', 'return ',  # Keywords
+            'const ', 'let ', 'var ', 'function', 'async ', 'await ',  # Declarations
+            '.map', '.filter', '.reduce', '.find', '.forEach',  # Array methods
+            '?.', '??',  # Optional chaining
+            'import ', 'export ', 'from ',  # Modules
+            'typeof ', 'instanceof ',  # Type checking
+        ]
+        text_lower = text.lower()
+        for indicator in code_indicators:
+            if indicator in text or indicator.lower() in text_lower:
                 return False
         
-        # Ignore technical patterns
+        # Reject if contains multiple colons (code pattern)
+        if text.count(':') > 1:
+            return False
+        
+        # Reject if has colon but not at the end (like "case 'value':")
+        if ':' in text and not text.endswith(':'):
+            # Allow "Error: message" style but reject "case 'value':" style
+            colon_pos = text.index(':')
+            before_colon = text[:colon_pos].strip()
+            # If what's before colon is a code keyword, reject
+            if before_colon.lower() in ['case', 'default', 'switch', 'type', 'interface', 'enum']:
+                return False
+        
+        # Reject if it looks like a code identifier (all lowercase, underscores, no spaces)
+        if re.match(r'^[a-z_][a-z0-9_]*$', text):
+            # Exception: common UI words
+            common_ui_words = {'ok', 'yes', 'no', 'save', 'cancel', 'close', 'open', 'edit', 
+                               'delete', 'add', 'remove', 'search', 'filter', 'clear', 'reset',
+                               'submit', 'confirm', 'next', 'previous', 'back', 'forward', 'home',
+                               'settings', 'help', 'about', 'logout', 'login', 'signup', 'loading',
+                               'more', 'less', 'show', 'hide', 'view', 'download', 'upload', 'send',
+                               'new', 'create', 'update', 'refresh', 'reload', 'copy', 'paste', 'cut'}
+            if text.lower() not in common_ui_words:
+                return False
+        
+        # Check technical patterns (fastest rejection)
         for pattern in self.TECHNICAL_PATTERNS:
             if re.search(pattern, text, re.IGNORECASE):
                 return False
         
-        # Must contain at least some letters
-        alpha_chars = sum(c.isalpha() for c in text)
-        if alpha_chars < len(text) * 0.4: # Allow some numbers/symbols
-            return False
-            
-        return True
+        # Single character: accept only if it's a letter or common UI symbol
+        if len(text) == 1:
+            return text.isalpha() or text in ['?', '!', '×', '✓', '✗', '+', '-']
+        
+        # If contains spaces, it's likely a sentence
+        if ' ' in text:
+            # Must have at least 40% alphabetic characters
+            alpha_chars = sum(c.isalpha() for c in text)
+            if alpha_chars < len(text) * 0.4:
+                return False
+            # Reject if it looks like code (multiple brackets/braces)
+            if re.search(r'[{}\[\]()].*[{}\[\]()]', text):
+                return False
+            return True
+        
+        # Single word: must start with uppercase (UI text convention)
+        # OR be in common UI words list (already checked above)
+        if text[0].isupper():
+            # Must be mostly letters
+            alpha_chars = sum(c.isalpha() for c in text)
+            if alpha_chars < len(text) * 0.7:
+                return False
+            return True
+        
+        # Reject everything else (lowercase single words not in common list)
+        return False
     
     def generate_translation_keys(self, strings: List[Dict]) -> Dict[str, Dict]:
         """Generate keys from strings"""
@@ -1444,7 +1534,14 @@ export default i18n;
     add_status_card(ft.Icons.INFO, "Select a React/TypeScript project to begin", status="info")
     
     async def close_app(e):
-        await page.window.close()
+        """Properly close the app and terminate all processes"""
+        try:
+            await page.window.destroy_async()
+        except:
+            pass
+        page.window.destroy()
+        import sys
+        sys.exit(0)
 
     # Layout with AppBar
     # Custom Window Drag Area

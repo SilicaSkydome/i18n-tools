@@ -38,13 +38,18 @@ A powerful, standalone desktop application designed to automate the internationa
 
 ## 🚀 Quick Start Guide
 
-### Option 1: Run the Executable (Recommended)
+### Option 1: Download & Run (Recommended for Users)
 
-This is the easiest way to use the tool.
+**100% Standalone - No Installation Required!**
 
-1.  Navigate to the **`dist`** folder in this repository.
-2.  Double-click **`i18n-tools.exe`**.
-3.  The application will launch immediately.
+1.  Download **`i18n-tools.exe`** from the [Releases](https://github.com/SilicaSkydome/i18n-tools/releases) page
+2.  Double-click the file
+3.  **Done!** The app launches immediately
+
+✅ No Python needed  
+✅ No dependencies to install  
+✅ Works offline (after download)  
+✅ Runs from anywhere (USB, desktop, network drive)
 
 ### Option 2: Run from Source Code
 
@@ -93,11 +98,41 @@ If your project doesn't have `i18n` configured, the tool will offer to set it up
 
 ---
 
+## 🔨 Building from Source
+
+### Quick Build (Recommended)
+```bash
+# Windows
+build.bat
+
+# Linux/macOS
+chmod +x build.sh && ./build.sh
+```
+
+### Manual Build
+```bash
+# Install dependencies
+pip install -r requirements.txt
+
+# Build with PyInstaller
+python -m PyInstaller --noconfirm --onefile --windowed \
+  --icon "icon.ico" --name "i18n-tools" \
+  --add-data "img;img" --add-data "icon.ico;." \
+  --hidden-import "flet" --hidden-import "deep_translator" \
+  i18n_manager_modern.py
+```
+
+The standalone `.exe` will be in the `dist/` folder (~84 MB).
+
+---
+
 ## 🛠️ Development & Building
 
 ### Project Structure
--   **`i18n_manager_modern.py`**: The main application file containing all logic and UI.
--   **`dist/`**: Contains the compiled `.exe` file.
+-   **`i18n_manager_modern.py`**: The main application file containing all logic and UI (1500 lines)
+-   **`build.bat`** / **`build.sh`**: One-click build scripts for Windows/Linux
+-   **`dist/`**: Contains the compiled standalone executable
+-   **`requirements.txt`**: Python dependencies (flet, deep-translator)
 -   **`img/`**: Assets (icons, images).
 -   **`icon.ico`**: The Windows application icon.
 
