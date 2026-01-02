@@ -724,6 +724,155 @@ class I18nManager:
             else:
                 count += 1
         return count
+    
+    def extract_used_translation_keys(self) -> set:
+        """Extract all t() calls from source code"""
+        if not self.src_dir:
+            return set()
+        
+        used_keys = set()
+        # Patterns to match t('key') or t("key") or {t('key')} or {t("key")}
+        patterns = [
+            r't\(["\']([^"\']+)["\']\)',  # t('key') or t("key")
+            r'\{t\(["\']([^"\']+)["\']\)\}',  # {t('key')} or {t("key")}
+        ]
+        
+        for filepath in self.src_dir.rglob('*'):
+            # Skip directories and non-code files
+            if filepath.is_dir():
+                continue
+            if filepath.suffix not in ['.ts', '.tsx', '.js', '.jsx']:
+                continue
+            
+            # Skip node_modules, dist, build, etc.
+            skip_dirs = ['node_modules', 'dist', 'build', '.git', 'i18n']
+            if any(skip in filepath.parts for skip in skip_dirs):
+                continue
+            
+            try:
+                content = filepath.read_text(encoding='utf-8')
+                for pattern in patterns:
+                    matches = re.findall(pattern, content)
+                    used_keys.update(matches)
+            except:
+                continue
+        
+        return used_keys
+    
+    def find_unused_translation_keys(self) -> Dict[str, List[str]]:
+        """Find keys in locale files that are not used in code"""
+        if not self.locales_dir or not self.locales_dir.exists():
+            return {}
+        
+        # Get all keys used in code
+        used_keys = self.extract_used_translation_keys()
+        
+        # Get all keys from locale files
+        unused_by_lang = {}
+        
+        for lang_file in self.locales_dir.glob('*.json'):
+            with open(lang_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            # Flatten the locale file to get all keys
+            all_keys = []
+            def flatten(d, prefix=''):
+                for k, v in d.items():
+                    full_key = f"{prefix}.{k}" if prefix else k
+                    if isinstance(v, dict):
+                        flatten(v, full_key)
+                    else:
+                        all_keys.append(full_key)
+            flatten(data)
+            
+            # Find unused keys
+            unused = [key for key in all_keys if key not in used_keys]
+            if unused:
+                unused_by_lang[lang_file.stem] = unused
+        
+        return unused_by_lang
+    
+    def archive_unused_keys(self, unused_by_lang: Dict[str, List[str]]) -> int:
+        """Move unused keys to archived files"""
+        if not self.locales_dir or not unused_by_lang:
+            return 0
+        
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        archive_dir = self.locales_dir.parent / 'archived_keys'
+        archive_dir.mkdir(exist_ok=True)
+        
+        total_archived = 0
+        
+        for lang, unused_keys in unused_by_lang.items():
+            lang_file = self.locales_dir / f'{lang}.json'
+            archive_file = archive_dir / f'{lang}_unused_{timestamp}.json'
+            
+            # Load current locale file
+            with open(lang_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            # Extract unused keys to archive
+            archived_data = {}
+            
+            for key in unused_keys:
+                # Navigate nested structure to extract the value
+                parts = key.split('.')
+                
+                # Get value from data
+                current = data
+                for part in parts[:-1]:
+                    current = current.get(part, {})
+                
+                last_key = parts[-1]
+                if last_key in current:
+                    # Store in archived data
+                    archive_current = archived_data
+                    for part in parts[:-1]:
+                        if part not in archive_current:
+                            archive_current[part] = {}
+                        archive_current = archive_current[part]
+                    archive_current[last_key] = current[last_key]
+                    
+                    # Remove from main data
+                    del current[last_key]
+                    total_archived += 1
+            
+            # Clean up empty sections in main data
+            def remove_empty(d):
+                keys_to_remove = []
+                for k, v in d.items():
+                    if isinstance(v, dict):
+                        remove_empty(v)
+                        if not v:  # Empty dict
+                            keys_to_remove.append(k)
+                for k in keys_to_remove:
+                    del d[k]
+            remove_empty(data)
+            
+            # Write updated locale file
+            with open(lang_file, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            
+            # Write archived keys
+            with open(archive_file, 'w', encoding='utf-8') as f:
+                json.dump(archived_data, f, indent=2, ensure_ascii=False)
+        
+        # Update .gitignore
+        gitignore_path = self.project_path / '.gitignore'
+        gitignore_entry = 'i18n/archived_keys/\n'
+        
+        try:
+            if gitignore_path.exists():
+                content = gitignore_path.read_text(encoding='utf-8')
+                if gitignore_entry.strip() not in content:
+                    with open(gitignore_path, 'a', encoding='utf-8') as f:
+                        f.write(f'\n# Archived unused translation keys\n{gitignore_entry}')
+            else:
+                gitignore_path.write_text(f'# Archived unused translation keys\n{gitignore_entry}', encoding='utf-8')
+        except:
+            pass  # .gitignore update is optional
+        
+        return total_archived
 
 
 def main(page: ft.Page):
@@ -1334,7 +1483,40 @@ export default i18n;
                 else:
                     add_status_card(ft.Icons.CHECK_CIRCLE, "No duplicate keys found!", status="success")
                 
+                # Check for unused keys
+                update_progress(0.3, "Checking for unused keys...")
+                unused_keys = manager.find_unused_translation_keys()
+                
+                if unused_keys:
+                    total_unused = sum(len(keys) for keys in unused_keys.values())
+                    add_status_card(
+                        ft.Icons.DELETE_SWEEP,
+                        f"Found {total_unused} unused translation keys!",
+                        "These keys exist in locale files but are not used in code. Click 'Archive Unused Keys' to move them.",
+                        status="warning"
+                    )
+                    
+                    # Show stats per language
+                    for lang, keys in unused_keys.items():
+                        if len(keys) <= 10:
+                            add_status_card(
+                                ft.Icons.INFO,
+                                f"{lang}.json: {len(keys)} unused keys",
+                                f"Keys: {', '.join(keys[:5])}{'...' if len(keys) > 5 else ''}",
+                                status="info"
+                            )
+                        else:
+                            add_status_card(
+                                ft.Icons.INFO,
+                                f"{lang}.json: {len(keys)} unused keys",
+                                f"Sample: {', '.join(keys[:3])}...",
+                                status="info"
+                            )
+                else:
+                    add_status_card(ft.Icons.CHECK_CIRCLE, "No unused keys found!", status="success")
+                
                 # Check for missing translations
+                update_progress(0.6, "Checking for missing translations...")
                 results = manager.validate_translations()
                 
                 if 'error' in results:
@@ -1352,8 +1534,49 @@ export default i18n;
                                     f"{manager.SUPPORTED_LANGUAGES[lang]}: {len(data['missing'])} missing",
                                     status="warning"
                                 )
+                
+                update_progress(1.0, "Validation complete")
             except Exception as ex:
                 add_status_card(ft.Icons.ERROR, f"Validation failed: {str(ex)}", status="warning")
+            finally:
+                set_busy(False, "")
+        
+        threading.Thread(target=worker, daemon=True).start()
+    
+    def run_archive_unused(e):
+        """Archive unused translation keys"""
+        if busy:
+            return
+        if not manager.project_path or not manager.has_i18n_setup:
+            add_status_card(ft.Icons.ERROR, "Please select a project with i18n setup first", status="warning")
+            return
+        
+        def worker():
+            try:
+                set_busy(True, "Archiving unused keys...")
+                add_status_card(ft.Icons.DELETE_SWEEP, "Finding and archiving unused keys...", status="running")
+                
+                # Find unused keys
+                unused_keys = manager.find_unused_translation_keys()
+                
+                if not unused_keys:
+                    add_status_card(ft.Icons.INFO, "No unused keys to archive", status="info")
+                    return
+                
+                # Archive them
+                archived_count = manager.archive_unused_keys(unused_keys)
+                
+                if archived_count > 0:
+                    add_status_card(
+                        ft.Icons.CHECK_CIRCLE,
+                        f"Archived {archived_count} unused keys!",
+                        "Keys moved to i18n/archived_keys/ (added to .gitignore)",
+                        status="success"
+                    )
+                else:
+                    add_status_card(ft.Icons.INFO, "No keys were archived", status="info")
+            except Exception as ex:
+                add_status_card(ft.Icons.ERROR, f"Archive failed: {str(ex)}", status="warning")
             finally:
                 set_busy(False, "")
         
@@ -1557,8 +1780,9 @@ export default i18n;
             create_action_card("Sync Keys", "Sync keys across all languages.", ft.Icons.SYNC, run_sync),
             create_action_card("Translate", "Auto-translate using Google Translate.", ft.Icons.TRANSLATE, run_translate),
             create_action_card("Replace Code", "Update source code with t() calls.", ft.Icons.EDIT, run_replace),
-            create_action_card("Validate", "Check for missing translations & duplicates.", ft.Icons.VERIFIED, run_validate),
+            create_action_card("Validate", "Check for duplicates & unused keys.", ft.Icons.VERIFIED, run_validate),
             create_action_card("Remove Duplicates", "Clean up duplicate keys in locale files.", ft.Icons.CLEANING_SERVICES, run_remove_duplicates),
+            create_action_card("Archive Unused Keys", "Move unused keys to archived files.", ft.Icons.DELETE_SWEEP, run_archive_unused),
         ], spacing=20, run_spacing=20)
 
         # Setup Card (Conditional)
