@@ -2,15 +2,15 @@
 
 ## Project Overview
 
-A **standalone desktop application** for automating React/TypeScript i18n workflows. Built with **Python + Flet** (Material Design 3), compiles to a portable `.exe` via **PyInstaller**. Zero dependencies on target machine.
+A **standalone desktop application** for automating JavaScript framework i18n workflows (React, Next.js, Vue, Angular, Svelte, etc.). Built with **Python + Flet** (Material Design 3), compiles to a portable `.exe` via **PyInstaller**. Zero dependencies on target machine.
 
-**Core Workflow**: Scan `.tsx` files → Detect hardcoded UI strings → Generate semantic keys → Auto-translate (Google) → Replace in source with `t('key')` calls.
+**Core Workflow**: Scan source files → Detect hardcoded UI strings → Generate semantic keys → Auto-translate (Google) → Replace in source with `t('key')` calls → Validate & clean up duplicates/unused keys.
 
 ## Architecture
 
 ### Single-File Design
-- **`i18n_manager_modern.py`**: ALL logic + UI (1500 lines). No separate modules.
-- **`I18nManager` class**: Business logic (scanning, translation, code modification).
+- **`i18n_manager_modern.py`**: ALL logic + UI (2000+ lines). No separate modules.
+- **`I18nManager` class**: Business logic (scanning, translation, code modification, validation).
 - **`main(page: ft.Page)` function**: Flet UI definition + event handlers.
 
 ### Technology Stack
@@ -20,17 +20,25 @@ A **standalone desktop application** for automating React/TypeScript i18n workfl
 ### Key Classes & Methods
 ```python
 class I18nManager:
-    SUPPORTED_LANGUAGES = {'en': 'English', 'nl': 'Dutch', ...}  # 20+ languages
-    SAFE_CONTEXTS = {  # Regex patterns for extracting translatable strings
-        'jsx_text': r'>([^<>{}\n]+)<',
-        'jsx_attr': r'(?:title|alt|placeholder)=["\'](...)["\']*',
-        'obj_property': r'(?:label|message):[\'"](...)["\']*'
+    SUPPORTED_LANGUAGES = {'en': 'English', 'nl': 'Dutch', ...}  # 22+ languages
+    SAFE_CONTEXTS = {  # Regex patterns for extracting translatable strings (JSX-only, strict)
+        'jsx_text': r'>\s*([A-Z][a-zA-Z0-9\s!?.,;:\'"()-]+|[A-Za-z]...',  # Capital start OR multi-word
+        'jsx_attr': r'<[^>]*?\s(?:title|alt|placeholder|aria-label|tooltip)=...',  # 5 specific attrs
     }
     
+    # Core workflow methods
     detect_hardcoded_text(source_dir) -> List[Dict]  # Scans .tsx/.ts/.jsx/.js
-    generate_translation_keys(strings) -> Dict  # Creates keys like "nav.home"
+    generate_translation_keys(strings) -> Dict  # Creates keys like "nav.home", auto-deduplicates
     translate_to_languages(keys_mapping, languages)  # Calls Google Translate API
     replace_in_source_code(keys_mapping)  # Injects t() calls + useTranslation import
+    
+    # Validation & cleanup methods (NEW)
+    detect_framework() -> Dict[str, str]  # Detects React/Next.js/Vue/Angular/etc from package.json
+    validate_locale_files() -> Dict  # Checks for duplicate keys (same text, different keys)
+    remove_duplicate_keys_from_locales() -> int  # Cleans up duplicates, keeps first occurrence
+    extract_used_translation_keys() -> set  # Scans code for all t('key') calls
+    find_unused_translation_keys() -> Dict  # Finds keys in locales not used in code
+    archive_unused_keys(unused_by_lang) -> int  # Moves unused keys to i18n/archived_keys/
 ```
 
 ## Critical Workflows
@@ -111,10 +119,12 @@ filepath.write_text(modified_content, encoding='utf-8')
 
 ### String Detection Logic
 **User-facing text filter** (`_is_user_facing()`):
-- **Reject**: `camelCase`, `ALL_CAPS`, `snake_case`, `kebab-case`, URLs, file extensions, CSS classes, hex colors
+- **Reject**: `camelCase`, `ALL_CAPS`, `snake_case`, `kebab-case`, URLs, file extensions, CSS classes, hex colors, code operators
+- **Reject Code Patterns**: `===`, `!==`, `case`, `const`, `.map`, `?.`, `typeof`, and 40+ other code indicators
 - **Accept**: Natural language sentences (spaces + letters > 40% of text)
+- **Multi-word OR Capital Start**: JSX text must start with uppercase OR contain multiple words
 
-Defined in `TECHNICAL_PATTERNS`:
+Defined in `TECHNICAL_PATTERNS` (50+ patterns):
 ```python
 r'^[a-z_]+$',  # lowercase_identifiers
 r'^/[a-zA-Z0-9/_-]*$',  # /paths/like/this
@@ -122,7 +132,54 @@ r'className=',  # CSS class attributes
 r'\.(jpg|png|svg|tsx|jsx|json|css)$',  # file extensions
 r'^https?://',  # URLs
 r't\(["\']',  # Already translated: t('key')
+r'===|!==',  # JavaScript operators
 ```
+
+**Code Rejection Keywords** (in `_is_user_facing()`):
+- JavaScript operators: `===`, `!==`, `&&`, `||`, `?.`, `??`
+- Control flow: `case `, `switch`, `typeof`, `instanceof`
+- Functions: `.map`, `.filter`, `.reduce`, `.forEach`, `.includes`
+- Common code patterns: `const `, `let `, `var `, `function`, `return`
+
+## Validation & Cleanup Features
+
+### Duplicate Key Detection (NEW)
+- **Problem**: Same text appears multiple times with different keys → bloated locale files (4000+ lines instead of 1000)
+- **Solution**: 
+  - `_deduplicate_strings()` - Removes duplicates BEFORE key generation
+  - `validate_locale_files()` - Scans existing locales for duplicate values
+  - `remove_duplicate_keys_from_locales()` - Cleans up, keeps first occurrence
+- **UI**: "Validate" button shows duplicate stats, "Remove Duplicates" button cleans them up
+
+### Unused Key Detection (NEW)
+- **Problem**: Old translations accumulate as code evolves, never cleaned up
+- **Solution**:
+  - `extract_used_translation_keys()` - Scans all source files for `t('key')` calls
+  - `find_unused_translation_keys()` - Compares locale files vs actual code usage
+  - `archive_unused_keys()` - Moves unused keys to `i18n/archived_keys/{lang}_unused_{timestamp}.json`
+  - Automatically adds `i18n/archived_keys/` to `.gitignore`
+- **UI**: "Validate" reports unused keys, "Archive Unused Keys" moves them to timestamped files for manual review
+
+### Framework Detection (NEW)
+- **Purpose**: Display which framework the project uses (React, Next.js, Vue, Angular, Svelte, etc.)
+- **Implementation**: 
+  - `detect_framework()` - Parses `package.json` dependencies in priority order
+  - Checks for: Next.js → React → Vue → Angular → Svelte → Solid → Preact → Qwik
+  - Extracts version from dependency string
+- **UI**: Shows "Framework: React v18.2.0" (or similar) in project selection card
+
+## Dashboard Actions
+
+The app provides 8 main actions (in order of typical workflow):
+
+1. **Detect Text** - Scans project for hardcoded UI strings
+2. **Generate Keys** - Creates semantic translation keys (auto-deduplicates)
+3. **Sync Keys** - Synchronizes keys across all language files
+4. **Translate** - Auto-translates using Google Translate
+5. **Replace Code** - Updates source code with `t()` calls
+6. **Validate** - Checks for duplicates, unused keys, and missing translations
+7. **Remove Duplicates** - Cleans up duplicate keys in locale files
+8. **Archive Unused Keys** - Moves unused translations to archive folder
 
 ## Flet UI Conventions
 

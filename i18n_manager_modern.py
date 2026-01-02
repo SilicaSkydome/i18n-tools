@@ -162,6 +162,44 @@ class I18nManager:
         self.generated_keys: Dict[str, str] = {}
         self.has_i18n_setup = False
         self.on_progress = None
+        self.framework: str = 'Unknown'  # Detected framework
+        self.framework_version: str = ''  # Framework version
+    
+    def detect_framework(self) -> Dict[str, str]:
+        """Detect the JavaScript framework being used"""
+        if not self.project_path:
+            return {'name': 'Unknown', 'version': ''}
+        
+        package_json = self.project_path / 'package.json'
+        if not package_json.exists():
+            return {'name': 'Unknown', 'version': ''}
+        
+        try:
+            with open(package_json, 'r', encoding='utf-8') as f:
+                pkg = json.load(f)
+            
+            dependencies = {**pkg.get('dependencies', {}), **pkg.get('devDependencies', {})}
+            
+            # Check for frameworks in priority order
+            framework_checks = [
+                ('Next.js', 'next'),
+                ('React', 'react'),
+                ('Vue', 'vue'),
+                ('Angular', '@angular/core'),
+                ('Svelte', 'svelte'),
+                ('Solid', 'solid-js'),
+                ('Preact', 'preact'),
+                ('Qwik', '@builder.io/qwik'),
+            ]
+            
+            for framework_name, package_name in framework_checks:
+                if package_name in dependencies:
+                    version = dependencies[package_name].replace('^', '').replace('~', '').replace('>=', '').replace('<=', '')
+                    return {'name': framework_name, 'version': version}
+            
+            return {'name': 'JavaScript', 'version': ''}
+        except:
+            return {'name': 'Unknown', 'version': ''}
     
     def detect_hardcoded_text(self, source_dir: Path) -> List[Dict]:
         """Detect hardcoded strings"""
@@ -955,6 +993,7 @@ def main(page: ft.Page):
     
     # UI Elements
     project_path_text = ft.Text("No project selected", color="onSurfaceVariant")
+    framework_text = ft.Text("Unknown", color="onSurfaceVariant", size=12)
     status_text = ft.Text("Select a project to begin", color="onSurfaceVariant")
 
     # Lazy FilePicker fallback (not used by default; native picker is more reliable in packaged builds)
@@ -1160,6 +1199,16 @@ def main(page: ft.Page):
         project_selected = True
         source_language_dd.disabled = busy
         update_action_availability()
+        
+        # Detect framework
+        framework_info = manager.detect_framework()
+        manager.framework = framework_info['name']
+        manager.framework_version = framework_info['version']
+        
+        framework_display = framework_info['name']
+        if framework_info['version']:
+            framework_display += f" v{framework_info['version']}"
+        framework_text.value = framework_display
         
         # Check i18n setup
         i18n_config = manager.src_dir / 'i18n' / 'config.ts'
@@ -1819,6 +1868,11 @@ export default i18n;
                         ft.Column([
                             ft.Text("Current Project", size=12, color="onSurfaceVariant"),
                             project_path_text,
+                            ft.Row([
+                                ft.Icon(ft.Icons.CODE, size=14, color="onSurfaceVariant"),
+                                ft.Text("Framework:", size=12, color="onSurfaceVariant"),
+                                framework_text,
+                            ], spacing=4),
                         ], expand=True),
                         ft.OutlinedButton("Change", icon=ft.Icons.FOLDER_OPEN, on_click=select_project)
                     ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
