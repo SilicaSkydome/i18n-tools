@@ -90,6 +90,9 @@ class I18nManager:
         
         # ONLY these specific JSX attributes
         'jsx_attr': r'<[^>]*?\s(?:title|alt|placeholder|aria-label|tooltip)=["\']([ A-Za-z0-9!?.,;:\'"()-]+)["\']',
+
+        # Common object literal properties in UI configs
+        'obj_property': r'(?<![\w$])(?:label|title|text|name|placeholder|aria-label|tooltip|caption|description|message)\s*:\s*["\']([ A-Za-z0-9!?.,;:\'"()-]+)["\']',
     }
     
     TECHNICAL_PATTERNS = [
@@ -350,40 +353,55 @@ class I18nManager:
     
     def generate_translation_keys(self, strings: List[Dict]) -> Dict[str, Dict]:
         """Generate keys from strings"""
-        # Deduplicate first to prevent duplicate keys
-        strings = self._deduplicate_strings(strings)
-        
-        mapping = {}
+        mapping: Dict[str, Dict] = {}
         used_keys = set()
-        
+        text_to_key: Dict[str, str] = {}
+
         for idx, string_info in enumerate(strings, 1):
             text = string_info['text']
+            normalized = ' '.join(text.strip().split())
             filepath = Path(string_info['file'])
+
+            # Reuse existing key for duplicate texts (keep all occurrences)
+            if normalized in text_to_key:
+                full_key = text_to_key[normalized]
+                mapping[full_key]['occurrences'].append({
+                    'file': str(filepath),
+                    'context': string_info['context'],
+                    'text': text,
+                })
+                continue
+
             section = self._determine_section(filepath)
-            
             words = re.findall(r'\b[A-Z][a-z]+', text)
             key_base = ''.join(word.lower() for word in words[:3]) or 'text'
-            
+
             key_name = key_base
             counter = 1
             while f'{section}.{key_name}' in used_keys:
                 key_name = f'{key_base}{counter}'
                 counter += 1
-            
+
             full_key = f'{section}.{key_name}'
             used_keys.add(full_key)
-            
+            text_to_key[normalized] = full_key
+
             mapping[full_key] = {
                 'text': text,
                 'file': str(filepath),
                 'context': string_info['context'],
                 'section': section,
-                'key_name': key_name
+                'key_name': key_name,
+                'occurrences': [{
+                    'file': str(filepath),
+                    'context': string_info['context'],
+                    'text': text,
+                }]
             }
-            
+
             if self.on_progress and idx % 10 == 0:
                 self.on_progress(idx / len(strings))
-        
+
         return mapping
     
     def _determine_section(self, filepath: Path) -> str:
@@ -560,14 +578,18 @@ class I18nManager:
             for full_key, info in keys_mapping.items():
                 section, key_name = full_key.split('.', 1)
                 text = info['text']
-                
+
                 if section not in data:
                     data[section] = {}
-                
+
+                existing = data[section].get(key_name)
+
                 if lang == source_lang:
-                    data[section][key_name] = text
+                    if not existing or (isinstance(existing, str) and existing.startswith(marker)):
+                        data[section][key_name] = text
                 else:
-                    data[section][key_name] = f'{marker}{text}'
+                    if not existing or (isinstance(existing, str) and existing.startswith(marker)):
+                        data[section][key_name] = f'{marker}{text}'
             
             with open(lang_file, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
@@ -621,11 +643,19 @@ class I18nManager:
         
         files_map = defaultdict(list)
         for full_key, info in keys_mapping.items():
-            files_map[info['file']].append({
-                'key': full_key,
-                'text': info['text'],
-                'context': info['context']
-            })
+            occurrences = info.get('occurrences') or [{
+                'file': info.get('file'),
+                'text': info.get('text'),
+                'context': info.get('context')
+            }]
+            for occ in occurrences:
+                if not occ.get('file') or not occ.get('text') or not occ.get('context'):
+                    continue
+                files_map[occ['file']].append({
+                    'key': full_key,
+                    'text': occ['text'],
+                    'context': occ['context']
+                })
         
         for filepath, replacements in files_map.items():
             filepath = Path(filepath)
@@ -748,7 +778,7 @@ class I18nManager:
                 target_value = target.get(key, {})
                 missing.extend(self._find_missing_keys(value, target_value, full_key))
             else:
-                if key not in target or (isinstance(target.get(key), str) and target[key].startswith('[EN] ')):
+                if key not in target or (isinstance(target.get(key), str) and target[key].startswith('[SRC] ')):
                     missing.append(full_key)
         
         return missing
@@ -771,8 +801,8 @@ class I18nManager:
         used_keys = set()
         # Patterns to match t('key') or t("key") or {t('key')} or {t("key")}
         patterns = [
-            r't\(["\']([^"\']+)["\']\)',  # t('key') or t("key")
-            r'\{t\(["\']([^"\']+)["\']\)\}',  # {t('key')} or {t("key")}
+            r'\bt\(\s*["\']([^"\']+)["\']',  # t('key') or t("key") with optional args
+            r'\bi18n\.t\(\s*["\']([^"\']+)["\']',  # i18n.t('key')
         ]
         
         for filepath in self.src_dir.rglob('*'):
