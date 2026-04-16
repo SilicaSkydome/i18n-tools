@@ -13,6 +13,7 @@ import shutil
 from datetime import datetime
 from collections import defaultdict
 import threading
+import time
 from typing import List, Dict, Optional
 import sys
 import ctypes
@@ -201,7 +202,7 @@ class I18nManager:
                     return {'name': framework_name, 'version': version}
             
             return {'name': 'JavaScript', 'version': ''}
-        except:
+        except (json.JSONDecodeError, OSError, KeyError):
             return {'name': 'Unknown', 'version': ''}
     
     def detect_hardcoded_text(self, source_dir: Path) -> List[Dict]:
@@ -225,28 +226,34 @@ class I18nManager:
                 
                 if self.on_progress:
                     self.on_progress(idx / len(files))
-            except:
+            except (OSError, UnicodeDecodeError):
                 pass
         
         return findings
     
     def _scan_file(self, content: str, filepath: Path) -> List[Dict]:
-        """Scan file for strings"""
+        """Scan file for strings, avoiding duplicate matches for the same text+line"""
         findings = []
         existing_keys = set(re.findall(r't\(["\']([^"\']+)["\']\)', content))
-        
+        seen = set()  # (text, line_num) pairs to avoid cross-context duplicates
+
         for context_name, pattern in self.SAFE_CONTEXTS.items():
             for match in re.finditer(pattern, content):
                 text = match.group(1).strip()
-                if text and text not in existing_keys and self._is_user_facing(text):
-                    line_num = content[:match.start()].count('\n') + 1
-                    findings.append({
-                        'file': str(filepath),
-                        'line': line_num,
-                        'text': text,
-                        'context': context_name
-                    })
-        
+                if not text or text in existing_keys or not self._is_user_facing(text):
+                    continue
+                line_num = content[:match.start()].count('\n') + 1
+                key = (text, line_num)
+                if key in seen:
+                    continue
+                seen.add(key)
+                findings.append({
+                    'file': str(filepath),
+                    'line': line_num,
+                    'text': text,
+                    'context': context_name
+                })
+
         return findings
     
     def _is_user_facing(self, text: str) -> bool:
@@ -288,20 +295,20 @@ class I18nManager:
                 return False
         
         # Reject if it looks like a code identifier (all lowercase, underscores, no spaces)
+        common_ui_words = {'ok', 'yes', 'no', 'save', 'cancel', 'close', 'open', 'edit',
+                           'delete', 'add', 'remove', 'search', 'filter', 'clear', 'reset',
+                           'submit', 'confirm', 'next', 'previous', 'back', 'forward', 'home',
+                           'settings', 'help', 'about', 'logout', 'login', 'signup', 'loading',
+                           'more', 'less', 'show', 'hide', 'view', 'download', 'upload', 'send',
+                           'new', 'create', 'update', 'refresh', 'reload', 'copy', 'paste', 'cut'}
         if re.match(r'^[a-z_][a-z0-9_]*$', text):
-            # Exception: common UI words
-            common_ui_words = {'ok', 'yes', 'no', 'save', 'cancel', 'close', 'open', 'edit', 
-                               'delete', 'add', 'remove', 'search', 'filter', 'clear', 'reset',
-                               'submit', 'confirm', 'next', 'previous', 'back', 'forward', 'home',
-                               'settings', 'help', 'about', 'logout', 'login', 'signup', 'loading',
-                               'more', 'less', 'show', 'hide', 'view', 'download', 'upload', 'send',
-                               'new', 'create', 'update', 'refresh', 'reload', 'copy', 'paste', 'cut'}
-            if text.lower() not in common_ui_words:
-                return False
-        
-        # Check technical patterns (fastest rejection)
+            if text.lower() in common_ui_words:
+                return True  # Whitelisted UI word — accept immediately
+            return False
+
+        # Check technical patterns (no IGNORECASE — patterns are case-sensitive by design)
         for pattern in self.TECHNICAL_PATTERNS:
-            if re.search(pattern, text, re.IGNORECASE):
+            if re.search(pattern, text):
                 return False
         
         # Single character: accept only if it's a letter or common UI symbol
@@ -373,8 +380,8 @@ class I18nManager:
                 continue
 
             section = self._determine_section(filepath)
-            words = re.findall(r'\b[A-Z][a-z]+', text)
-            key_base = ''.join(word.lower() for word in words[:3]) or 'text'
+            words = re.findall(r'\b[a-zA-Z]+', text)
+            key_base = '_'.join(word.lower() for word in words[:4]) or 'text'
 
             key_name = key_base
             counter = 1
@@ -405,19 +412,29 @@ class I18nManager:
         return mapping
     
     def _determine_section(self, filepath: Path) -> str:
-        """Determine section from path"""
-        path_lower = str(filepath).lower()
-        
+        """Determine section from path components (not substring matching)"""
+        # Use individual path parts and the file stem for matching
+        parts = [p.lower() for p in filepath.parts] + [filepath.stem.lower()]
+
         sections = {
-            'nav': 'nav', 'footer': 'footer', 'home': 'home', 'about': 'about',
-            'contact': 'contact', 'auth': 'auth', 'login': 'auth', 'form': 'form',
-            'button': 'button'
+            'nav': 'nav', 'navbar': 'nav', 'navigation': 'nav',
+            'footer': 'footer',
+            'home': 'home', 'homepage': 'home',
+            'about': 'about',
+            'contact': 'contact',
+            'auth': 'auth', 'login': 'auth', 'signin': 'auth', 'signup': 'auth',
+            'form': 'form',
+            'button': 'button',
+            'header': 'header',
+            'dashboard': 'dashboard',
+            'settings': 'settings',
+            'profile': 'profile',
         }
-        
-        for key, section in sections.items():
-            if key in path_lower:
-                return section
-        
+
+        for part in parts:
+            if part in sections:
+                return sections[part]
+
         return 'common'
     
     def sync_translation_keys(self):
@@ -430,18 +447,24 @@ class I18nManager:
         if not base_file.exists():
             return
         
-        with open(base_file, 'r', encoding='utf-8') as f:
-            base_data = json.load(f)
-        
+        try:
+            with open(base_file, 'r', encoding='utf-8') as f:
+                base_data = json.load(f)
+        except (json.JSONDecodeError, OSError) as err:
+            raise RuntimeError(f"Cannot read base locale {base_lang}.json: {err}")
+
         for lang_file in self.locales_dir.glob('*.json'):
             if lang_file.stem == base_lang:
                 continue
-            
-            with open(lang_file, 'r', encoding='utf-8') as f:
-                lang_data = json.load(f)
-            
+
+            try:
+                with open(lang_file, 'r', encoding='utf-8') as f:
+                    lang_data = json.load(f)
+            except (json.JSONDecodeError, OSError):
+                lang_data = {}
+
             synced = self._sync_nested_dict(base_data, lang_data, lang_file.stem)
-            
+
             with open(lang_file, 'w', encoding='utf-8') as f:
                 json.dump(synced, f, indent=2, ensure_ascii=False)
     
@@ -467,9 +490,13 @@ class I18nManager:
         stats = {}
         
         for lang_file in self.locales_dir.glob('*.json'):
-            with open(lang_file, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            
+            try:
+                with open(lang_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+            except (json.JSONDecodeError, OSError) as err:
+                issues.append(f"{lang_file.name}: failed to parse ({err})")
+                continue
+
             # Flatten the nested structure
             all_values = []
             def flatten(d, prefix=''):
@@ -510,51 +537,54 @@ class I18nManager:
         }
     
     def remove_duplicate_keys_from_locales(self) -> int:
-        """Remove duplicate keys from locale files, keeping first occurrence"""
+        """Remove duplicate values WITHIN each section, keeping first occurrence.
+
+        Only removes keys whose values duplicate another key in the *same*
+        top-level section.  Keys in different sections (e.g. nav.home and
+        button.home) are kept even if they share a value.
+        """
         if not self.locales_dir or not self.locales_dir.exists():
             return 0
-        
+
         total_removed = 0
-        
+
         for lang_file in self.locales_dir.glob('*.json'):
-            with open(lang_file, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            
-            # Track seen values and keys to remove
-            seen_values = {}
-            keys_to_remove = []
-            
-            def process_dict(d, prefix=''):
+            try:
+                with open(lang_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+            except (json.JSONDecodeError, OSError):
+                continue
+
+            keys_to_remove: list[tuple[dict, str]] = []
+
+            def process_section(d: dict):
+                """Find duplicate values within a single dict level."""
                 nonlocal total_removed
+                seen_values: dict[str, str] = {}
                 for k, v in list(d.items()):
-                    full_key = f"{prefix}{k}"
                     if isinstance(v, dict):
-                        process_dict(v, f"{full_key}.")
-                    else:
-                        # Normalize value
-                        clean_value = v.replace('[SRC] ', '').strip()
-                        clean_value = ' '.join(clean_value.split())
-                        
-                        if clean_value in seen_values:
-                            # Duplicate found - mark for removal
+                        process_section(v)
+                    elif isinstance(v, str):
+                        clean = v.replace('[SRC] ', '').strip()
+                        clean = ' '.join(clean.split())
+                        if clean in seen_values:
                             keys_to_remove.append((d, k))
                             total_removed += 1
                         else:
-                            seen_values[clean_value] = full_key
-            
-            process_dict(data)
-            
-            # Remove duplicates
-            for parent_dict, key in keys_to_remove:
-                del parent_dict[key]
-            
-            # Clean up empty sections
-            data = {k: v for k, v in data.items() if v}  # Remove empty dicts
-            
-            # Write back
-            with open(lang_file, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
-        
+                            seen_values[clean] = k
+
+            process_section(data)
+
+            if keys_to_remove:
+                for parent_dict, key in keys_to_remove:
+                    del parent_dict[key]
+
+                # Clean up empty sections
+                data = {k: v for k, v in data.items() if v}
+
+                with open(lang_file, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, indent=2, ensure_ascii=False)
+
         return total_removed
     
     def translate_to_languages(self, keys_mapping: Dict, languages: List[str]):
@@ -617,29 +647,59 @@ class I18nManager:
         with open(filepath, 'w', encoding='utf-8') as f:
             json.dump(translated, f, indent=2, ensure_ascii=False)
     
-    def _translate_dict(self, data: dict, target_lang: str, source_lang: str, marker: str) -> dict:
-        """Recursively translate dict"""
+    def _translate_dict(self, data: dict, target_lang: str, source_lang: str, marker: str,
+                        _translator: GoogleTranslator = None) -> dict:
+        """Recursively translate dict, reusing a single translator instance"""
+        if _translator is None:
+            _translator = GoogleTranslator(source=source_lang, target=target_lang)
+
         result = {}
-        
+
         for key, value in data.items():
             if isinstance(value, dict):
-                result[key] = self._translate_dict(value, target_lang, source_lang, marker)
+                result[key] = self._translate_dict(value, target_lang, source_lang, marker,
+                                                   _translator=_translator)
             elif isinstance(value, str) and value.startswith(marker):
                 original = value[len(marker):]
-                try:
-                    translator = GoogleTranslator(source=source_lang, target=target_lang)
-                    result[key] = translator.translate(original)
-                except:
-                    result[key] = value
+                translated = self._translate_with_retry(_translator, original)
+                result[key] = translated if translated is not None else value
             else:
                 result[key] = value
-        
+
         return result
+
+    @staticmethod
+    def _translate_with_retry(translator: GoogleTranslator, text: str,
+                              max_retries: int = 3) -> Optional[str]:
+        """Translate a single string with exponential backoff on failure."""
+        for attempt in range(max_retries):
+            try:
+                return translator.translate(text)
+            except Exception:
+                if attempt < max_retries - 1:
+                    time.sleep(0.5 * (2 ** attempt))  # 0.5s, 1s, 2s
+                else:
+                    return None
     
+    MAX_BACKUPS = 10
+
+    def _cleanup_old_backups(self):
+        """Keep only the most recent MAX_BACKUPS backup directories."""
+        if not self.backups_dir.exists():
+            return
+        dirs = sorted(
+            [d for d in self.backups_dir.iterdir() if d.is_dir()],
+            key=lambda d: d.name,
+            reverse=True,
+        )
+        for old_dir in dirs[self.MAX_BACKUPS:]:
+            shutil.rmtree(old_dir, ignore_errors=True)
+
     def replace_in_source_code(self, keys_mapping: Dict):
         """Replace hardcoded text in code"""
         backup_dir = self.backups_dir / datetime.now().strftime('%Y%m%d_%H%M%S')
         backup_dir.mkdir(parents=True, exist_ok=True)
+        self._cleanup_old_backups()
         
         files_map = defaultdict(list)
         for full_key, info in keys_mapping.items():
@@ -659,8 +719,15 @@ class I18nManager:
         
         for filepath, replacements in files_map.items():
             filepath = Path(filepath)
-            
-            shutil.copy2(filepath, backup_dir / filepath.name)
+
+            # Preserve relative path in backup to avoid name collisions
+            try:
+                rel = filepath.relative_to(self.project_path)
+            except ValueError:
+                rel = Path(filepath.name)
+            backup_dest = backup_dir / rel
+            backup_dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(filepath, backup_dest)
             
             content = filepath.read_text(encoding='utf-8')
             modified_content = content
@@ -679,28 +746,50 @@ class I18nManager:
             filepath.write_text(modified_content, encoding='utf-8')
     
     def _add_i18n_import(self, content: str) -> str:
-        """Add import and hook"""
+        """Add import and useTranslation hook, supporting common React patterns"""
         import_line = "import { useTranslation } from 'react-i18next';\n"
-        
-        if 'from "react"' in content or "from 'react'" in content:
-            content = re.sub(
-                r'(import.*from ["\']react["\'];?\n)',
-                r'\1' + import_line,
-                content,
-                count=1
-            )
-        else:
-            content = import_line + '\n' + content
-        
-        if '{ t }' not in content:
-            component_pattern = r'(export\s+default\s+function\s+\w+\s*\([^)]*\)\s*\{)'
-            match = re.search(component_pattern, content)
-            
-            if match:
-                pos = match.end()
-                hook_line = '\n  const { t } = useTranslation();\n'
-                content = content[:pos] + hook_line + content[pos:]
-        
+
+        # Add import statement after React import, or after last import, or at top
+        if 'useTranslation' not in content:
+            react_import = re.search(r'(import.*from\s+["\']react["\'];?\n)', content)
+            if react_import:
+                pos = react_import.end()
+                content = content[:pos] + import_line + content[pos:]
+            else:
+                # Insert after the last import statement
+                last_import = None
+                for m in re.finditer(r'^import\s.+;\s*\n', content, re.MULTILINE):
+                    last_import = m
+                if last_import:
+                    pos = last_import.end()
+                    content = content[:pos] + import_line + content[pos:]
+                else:
+                    content = import_line + '\n' + content
+
+        # Add useTranslation() hook if not present
+        if '{ t }' not in content and '{ t,' not in content and '{t}' not in content:
+            # Try multiple component patterns in priority order
+            component_patterns = [
+                # export default function Name(...) {
+                r'(export\s+default\s+function\s+\w+\s*\([^)]*\)\s*\{)',
+                # export function Name(...) {
+                r'(export\s+function\s+\w+\s*\([^)]*\)\s*\{)',
+                # function Name(...) {  (standalone)
+                r'(^function\s+[A-Z]\w*\s*\([^)]*\)\s*\{)',
+                # const Name = (...) => {  or const Name: React.FC = (...) => {
+                r'(const\s+[A-Z]\w*\s*(?::\s*\S+\s*)?=\s*(?:\([^)]*\)|[a-zA-Z_]\w*)\s*(?::\s*\S+\s*)?=>\s*\{)',
+                # const Name = function(...) {
+                r'(const\s+[A-Z]\w*\s*=\s*function\s*\([^)]*\)\s*\{)',
+            ]
+
+            for pattern in component_patterns:
+                match = re.search(pattern, content, re.MULTILINE)
+                if match:
+                    pos = match.end()
+                    hook_line = '\n  const { t } = useTranslation();\n'
+                    content = content[:pos] + hook_line + content[pos:]
+                    break
+
         return content
     
     def _apply_replacement(self, content: str, text: str, key: str, context: str) -> str:
@@ -822,7 +911,7 @@ class I18nManager:
                 for pattern in patterns:
                     matches = re.findall(pattern, content)
                     used_keys.update(matches)
-            except:
+            except (OSError, UnicodeDecodeError):
                 continue
         
         return used_keys
@@ -937,7 +1026,7 @@ class I18nManager:
                         f.write(f'\n# Archived unused translation keys\n{gitignore_entry}')
             else:
                 gitignore_path.write_text(f'# Archived unused translation keys\n{gitignore_entry}', encoding='utf-8')
-        except:
+        except OSError:
             pass  # .gitignore update is optional
         
         return total_archived
@@ -951,7 +1040,7 @@ def main(page: ft.Page):
         # Unique ID to ensure taskbar grouping works correctly
         myappid = 'uniteddutchcompany.i18ntools.modern.v1.2'
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
-    except:
+    except (AttributeError, OSError):
         pass
     
     # Configure page - Material Design 3
@@ -1008,6 +1097,7 @@ def main(page: ft.Page):
     project_selected = False
 
     busy = False
+    busy_lock = threading.Lock()
 
     action_run_buttons: list[ft.Control] = []
 
@@ -1077,7 +1167,8 @@ def main(page: ft.Page):
 
     def set_busy(is_busy: bool, text: str = ""):
         nonlocal busy
-        busy = is_busy
+        with busy_lock:
+            busy = is_busy
         update_progress(None if is_busy else 1.0, text)
         update_action_availability()
         refresh_language_controls()
@@ -1171,7 +1262,7 @@ def main(page: ft.Page):
         label="Source language",
         value=source_language,
         options=[ft.dropdown.Option(code, name) for code, name in sorted(manager.SUPPORTED_LANGUAGES.items(), key=lambda x: x[1])],
-        on_select=on_source_language_change,
+        on_change=on_source_language_change,
         disabled=True,
         width=260,
     )
@@ -1314,12 +1405,16 @@ def main(page: ft.Page):
         def close_dialog(e):
             dialog.open = False
             page.update()
-        
+            if dialog in page.overlay:
+                page.overlay.remove(dialog)
+
         def create_setup(e):
             dialog.open = False
             page.update()
+            if dialog in page.overlay:
+                page.overlay.remove(dialog)
             run_setup()
-        
+
         dialog = ft.AlertDialog(
             modal=True,
             title=ft.Text("Setup i18n?"),
@@ -1340,17 +1435,28 @@ def main(page: ft.Page):
             locales_dir = i18n_dir / 'locales'
             locales_dir.mkdir(parents=True, exist_ok=True)
             
-            # Config file
+            # Config file — register all selected languages
             base_lang = manager.source_language or 'en'
+            imports = []
+            resources = []
+            for lang in selected_languages:
+                var_name = f'lang_{lang}' if lang != base_lang else 'source'
+                imports.append(f"import {var_name} from './locales/{lang}.json';")
+                resources.append(f"  '{lang}': {{ translation: {var_name} }}")
+
+            imports_str = '\n'.join(imports)
+            resources_str = ',\n'.join(resources)
             config_content = f"""import i18n from 'i18next';
 import {{ initReactI18next }} from 'react-i18next';
-import source from './locales/{base_lang}.json';
+{imports_str}
 
 i18n.use(initReactI18next).init({{
-    resources: {{ '{base_lang}': {{ translation: source }} }},
-    lng: '{base_lang}',
-    fallbackLng: '{base_lang}',
-    interpolation: {{ escapeValue: false }}
+  resources: {{
+{resources_str}
+  }},
+  lng: '{base_lang}',
+  fallbackLng: '{base_lang}',
+  interpolation: {{ escapeValue: false }}
 }});
 
 export default i18n;
@@ -1373,16 +1479,18 @@ export default i18n;
             add_status_card(ft.Icons.CHECK_CIRCLE, "i18n setup complete!", status="success")
             
             # Show info dialog
+            def close_info_dialog():
+                info_dialog.open = False
+                page.update()
+                if info_dialog in page.overlay:
+                    page.overlay.remove(info_dialog)
+
             info_dialog = ft.AlertDialog(
                 title=ft.Text("Setup Complete!"),
                 content=ft.Text("i18n configured successfully!\n\nNext steps:\n1. Run 'npm install react-i18next i18next'\n2. Import './i18n' in your App.tsx"),
                 actions=[ft.TextButton("OK", on_click=lambda e: close_info_dialog())],
             )
-            
-            def close_info_dialog():
-                info_dialog.open = False
-                page.update()
-            
+
             page.overlay.append(info_dialog)
             info_dialog.open = True
             page.update()
@@ -1405,10 +1513,11 @@ export default i18n;
                 manager.on_progress = update_progress
                 
                 strings = manager.detect_hardcoded_text(manager.src_dir)
+                strings = manager._deduplicate_strings(strings)
                 manager.detected_strings = strings
 
                 render_detect_results()
-                
+
                 add_status_card(ft.Icons.CHECK_CIRCLE, f"Found {len(strings)} hardcoded strings", status="success")
                 update_progress(1.0)
             except Exception as ex:
@@ -1608,9 +1717,10 @@ export default i18n;
                         add_status_card(ft.Icons.WARNING, f"{total_missing} missing translations", status="warning")
                         for lang, data in results.items():
                             if data['missing']:
+                                lang_name = manager.SUPPORTED_LANGUAGES.get(lang, lang)
                                 add_status_card(
                                     ft.Icons.WARNING,
-                                    f"{manager.SUPPORTED_LANGUAGES[lang]}: {len(data['missing'])} missing",
+                                    f"{lang_name}: {len(data['missing'])} missing",
                                     status="warning"
                                 )
                 
@@ -1932,22 +2042,24 @@ export default i18n;
     
     def create_action_view(title: str, description: str, icon_name: str, action):
         """Create action view"""
+        run_btn = ft.FilledButton(
+            title,
+            icon=icon_name,
+            on_click=action,
+            height=48,
+            disabled=(not project_selected) or busy,
+        )
+        action_run_buttons.append(run_btn)
         return ft.Column([
             ft.Text(title, size=28, weight=ft.FontWeight.BOLD, color="onSurface"),
-            
+
             ft.Card(
                 elevation=3,
                 content=ft.Container(
                     content=ft.Column([
                         ft.Icon(icon_name, size=48, color="primary"),
                         ft.Text(description, size=14, color="onSurface"),
-                        ft.FilledButton(
-                            title,
-                            icon=icon_name,
-                            on_click=action,
-                            height=48,
-                            disabled=(not project_selected) or busy,
-                        ),
+                        run_btn,
                     ], spacing=20, horizontal_alignment=ft.CrossAxisAlignment.CENTER),
                     padding=40,
                     bgcolor="surface",
@@ -1957,17 +2069,19 @@ export default i18n;
         ], spacing=16, scroll=ft.ScrollMode.AUTO, horizontal_alignment=ft.CrossAxisAlignment.CENTER)
 
     def create_detect_view():
+        detect_btn = ft.FilledButton(
+            "Detect",
+            icon=ft.Icons.SEARCH,
+            on_click=run_detect,
+            height=48,
+            disabled=(not project_selected) or busy,
+        )
+        action_run_buttons.append(detect_btn)
         return ft.Column(
             [
                 ft.Text("Detect Hardcoded Text", size=28, weight=ft.FontWeight.BOLD, color="onSurface"),
                 ft.Text("Run detection, then review what was found.", color="onSurfaceVariant"),
-                ft.FilledButton(
-                    "Detect",
-                    icon=ft.Icons.SEARCH,
-                    on_click=run_detect,
-                    height=48,
-                    disabled=(not project_selected) or busy,
-                ),
+                detect_btn,
                 ft.Divider(height=16, color="transparent"),
                 ft.Text("Results", size=18, weight=ft.FontWeight.BOLD, color="onSurface"),
                 detect_summary,
@@ -1978,17 +2092,19 @@ export default i18n;
         )
 
     def create_generate_view():
+        generate_btn = ft.FilledButton(
+            "Generate",
+            icon=ft.Icons.KEY,
+            on_click=run_generate,
+            height=48,
+            disabled=(not project_selected) or busy,
+        )
+        action_run_buttons.append(generate_btn)
         return ft.Column(
             [
                 ft.Text("Generate Translation Keys", size=28, weight=ft.FontWeight.BOLD, color="onSurface"),
                 ft.Text("Generate keys from detected strings, then review the mapping.", color="onSurfaceVariant"),
-                ft.FilledButton(
-                    "Generate",
-                    icon=ft.Icons.KEY,
-                    on_click=run_generate,
-                    height=48,
-                    disabled=(not project_selected) or busy,
-                ),
+                generate_btn,
                 ft.Divider(height=16, color="transparent"),
                 ft.Text("Generated Keys", size=18, weight=ft.FontWeight.BOLD, color="onSurface"),
                 keys_summary,
@@ -2022,14 +2138,14 @@ export default i18n;
     add_status_card(ft.Icons.INFO, "Select a React/TypeScript project to begin", status="info")
     
     async def close_app(e):
-        """Properly close the app and terminate all processes"""
+        """Properly close the app"""
         try:
             await page.window.destroy_async()
-        except:
-            pass
-        page.window.destroy()
-        import sys
-        sys.exit(0)
+        except Exception:
+            try:
+                page.window.destroy()
+            except Exception:
+                pass
 
     # Layout with AppBar
     # Custom Window Drag Area
